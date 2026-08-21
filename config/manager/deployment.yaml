@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gated
+  namespace: gated-system
+  labels:
+    app.kubernetes.io/name: gated
+spec:
+  # More than one, because everything except ordering certificates runs on
+  # every replica and losing one must not take traffic with it (ADR 0006).
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gated
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gated
+    spec:
+      serviceAccountName: gated
+      # The manager drains its listeners for 25 seconds and then has 30 to
+      # stop, so anything shorter than this kills a replica mid-drain.
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: gated
+      containers:
+        - name: gated
+          image: ghcr.io/yuanying/gated:latest
+          args:
+            # Only settings that mean the same thing in every cluster belong
+            # here. The ones that name a deployment — the ACME directory and
+            # contact, the central authentication host, the identity provider
+            # clients — have no defaults on purpose (ADR 0009) and are added
+            # by an overlay. Without them gated refuses to start and says
+            # which flag is missing.
+            - --ingress-class=gated
+            - --http-addr=:8080
+            - --https-addr=:8443
+            - --metrics-addr=:9090
+            - --health-probe-addr=:9091
+            # Everything replicas share lives in this namespace, whichever
+            # one that turns out to be.
+            - --acme-account-secret=$(POD_NAMESPACE)/gated-acme-account
+            - --session-key-secret=$(POD_NAMESPACE)/gated-session-key
+            - --challenge-secret-namespace=$(POD_NAMESPACE)
+            - --leader-election-namespace=$(POD_NAMESPACE)
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+            - name: health
+              containerPort: 9091
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            # Reports not-ready until the routing table, the permissions, the
+            # tokens and the session key have all been read: a replica that
+            # has read none of them would answer as though nothing were
+            # protected.
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gated
+  labels:
+    app.kubernetes.io/name: gated
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gated
+subjects:
+  - kind: ServiceAccount
+    name: gated
+    namespace: gated-system

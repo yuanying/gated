@@ -1,0 +1,98 @@
+# The application the tests protect, and the stand-in identity provider.
+#
+# Both are the testsrv image in different modes. They live in their own
+# namespace so that the tests exercise gated routing to an Ingress somewhere
+# other than where gated itself runs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: gated-e2e
+spec:
+  selector:
+    app.kubernetes.io/name: backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: gated-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: backend
+    spec:
+      containers:
+        - name: testsrv
+          image: gated-testsrv:e2e
+          imagePullPolicy: IfNotPresent
+          args:
+            - -mode=backend
+            - -addr=:8080
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-idp
+  namespace: gated-e2e
+spec:
+  # A NodePort because the test plays the part of the browser, and a browser
+  # is sent to the identity provider itself.
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: mock-idp
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 31081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-idp
+  namespace: gated-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mock-idp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mock-idp
+    spec:
+      containers:
+        - name: testsrv
+          image: gated-testsrv:e2e
+          imagePullPolicy: IfNotPresent
+          args:
+            - -mode=idp
+            - -addr=:8080
+            - -client-id=gated-e2e
+            - -client-secret=gated-e2e-client-secret
+          ports:
+            - containerPort: 8080
+---
+# The OAuth client secret, placed by hand as it would be in a real
+# installation: the provider issues it, so there is nothing gated could
+# generate.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-oauth
+  namespace: gated-system
+type: Opaque
+stringData:
+  clientSecret: gated-e2e-client-secret

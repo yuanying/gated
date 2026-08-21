@@ -1,0 +1,30 @@
+# The cluster the end-to-end tests create and destroy.
+#
+# One node is enough: what the tests are about is several replicas of gated
+# sharing state through the API server, which does not need several machines.
+# The service subnet is stated rather than left to the default because the
+# manifests name two cluster IPs — the one Pebble resolves every hostname to,
+# and the DNS server Pebble asks — and those have to be inside it.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  serviceSubnet: "10.96.0.0/16"
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # gated's two listeners, reached through a NodePort. Bound to loopback
+      # so that a test cluster is never reachable from anywhere else.
+      - containerPort: 31080
+        hostPort: 31080
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      - containerPort: 31443
+        hostPort: 31443
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # The stand-in identity provider. The test acts as the browser, so it
+      # has to be able to follow a redirect to the provider itself.
+      - containerPort: 31081
+        hostPort: 31081
+        listenAddress: "127.0.0.1"
+        protocol: TCP

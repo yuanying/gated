@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gated
+  namespace: gated-system
+  labels:
+    app.kubernetes.io/name: gated
+spec:
+  # ClusterIP is the lowest common denominator. How traffic from outside the
+  # cluster arrives — a LoadBalancer, a NodePort, host ports — is a property
+  # of the cluster rather than of gated, so it is left to an overlay.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gated
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP

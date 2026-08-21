@@ -1,0 +1,234 @@
+# golangci-lint configuration for gated.
+#
+# The linters are named one by one rather than taken from a preset, so that
+# turning one on is a decision somebody made and turning one off leaves a
+# reason behind. The set is chosen for what this program is: an edge proxy that
+# terminates TLS, holds credentials and decides who may pass. Mistakes there
+# are quiet — an ignored error or a leaked response body does not fail a test —
+# so what earns a linter its place is finding what a test cannot.
+#
+# Every exclusion below carries the reason it is there. "Too noisy" on its own
+# is not one; if a rule does not apply to this tree, the comment says why.
+version: "2"
+
+run:
+  # The heavier test layers sit behind build tags (ADR 0007, 0011). Without
+  # these they would not be compiled, and so not linted at all.
+  #
+  # `e2e` and `live` are not here. They share a package, and the live layer
+  # replaces the parts of the end-to-end suite that differ (ADR 0025), so
+  # setting both at once declares the same names twice. `make lint` adds one
+  # and then the other, in passes of their own.
+  build-tags:
+    - envtest
+    - integration
+
+linters:
+  default: none
+  enable:
+    # The four golangci-lint enables by default. errcheck and staticcheck earn
+    # their place here more than anywhere: an unchecked write to the API server
+    # is a status that silently never lands.
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+    # A response body that is never closed leaks a connection. gated makes
+    # outbound requests on the login path and to the ACME directory, one per
+    # request and one per certificate.
+    - bodyclose
+    # Comparing errors with == breaks the moment something wraps them, and
+    # nearly everything returned here is wrapped.
+    - errorlint
+    # Returning nil after finding a non-nil error, which reads as success.
+    - nilerr
+    # An outbound request built without a context ignores cancellation, so a
+    # shutdown waits on a backend that may never answer.
+    - noctx
+    # http.MethodGet over "GET", http.StatusOK over 200. The authorisation
+    # rules are written in terms of both, and a typo in a bare string is
+    # silent.
+    - usestdlibvars
+    # Bugs go vet does not reach.
+    - copyloopvar
+    - durationcheck
+    - makezero
+    - wastedassign
+    # Conversions and assertions that only hide what the type is. An assertion
+    # without the comma-ok form panics the whole proxy, not one request.
+    - unconvert
+    - forcetypeassert
+    # Documentation and messages are read by whoever is debugging at 3am.
+    - misspell
+    # A credential written into the source, and the other patterns worth
+    # refusing outright in a program that holds keys.
+    - gosec
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      exclude-functions:
+        # Writing the body of a response that has already had its status
+        # written. The error means the client went away mid-response; there is
+        # no second response to send and nothing to roll back.
+        - (net/http.ResponseWriter).Write
+    govet:
+      enable-all: true
+      disable:
+        # Struct field alignment is a memory-layout micro-optimisation. These
+        # structs are configuration read once at startup, and ordering their
+        # fields by size would scatter the ones that belong together.
+        - fieldalignment
+        # `if err := f(); err != nil` inside a function that already has an
+        # err is the ordinary shape of Go, and the whole tree is written that
+        # way. The check finds no bug here, only the idiom.
+        - shadow
+    gosec:
+      excludes:
+        # G404: math/rand. Every secret in this tree comes from crypto/rand
+        # (see internal/accesstoken and the session key); what is left is
+        # jitter and test fixtures.
+        - G404
+        # G104: an unhandled error. errcheck already reports these, with the
+        # two exclusions reasoned above; gosec reports the same lines again
+        # without knowing about them.
+        - G104
+    misspell:
+      # The prose in this tree is British: "authorisation", "behaviour".
+      locale: UK
+      ignore-rules:
+        # "finalize" is the name of a step and of a URL in RFC 8555, and of
+        # the field golang.org/x/crypto/acme exposes. Spelling the protocol's
+        # own term differently from the protocol helps nobody.
+        - finalize
+        - finalizing
+    staticcheck:
+      checks:
+        - all
+        # QF1001 rewrites a negated condition through De Morgan's law. Which
+        # of the two forms reads better depends on what the condition means,
+        # and the tool cannot know.
+        - -QF1001
+
+  exclusions:
+    generated: lax
+    presets:
+      # The Close/Flush family of errcheck findings. A deferred Close on a
+      # response body, and closing a listener while already returning an
+      # error, have nowhere to report to.
+      - std-error-handling
+    rules:
+      # Generated DeepCopy code is controller-gen's output. The only way to
+      # fix a finding in it is to stop generating it.
+      - path: zz_generated\..*\.go
+        linters:
+          - errcheck
+          - forcetypeassert
+          - gosec
+          - staticcheck
+          - unused
+
+      # Tests build fixtures and assert on them. An unchecked error in a
+      # helper fails the test on the next line, and a hard-coded key in a
+      # fixture is the point of the fixture.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+          - forcetypeassert
+          - gosec
+          - noctx
+
+      # The kinds Kubernetes defines are proper nouns. An error that starts
+      # "Secret default/x is of type ..." is capitalised because the word is,
+      # and lower-casing it would name a different thing.
+      - path: internal/controller/
+        linters:
+          - staticcheck
+        text: "ST1005: error strings should not be capitalized"
+
+      # Two APIs gated depends on are deprecated in favour of ones it cannot
+      # move to yet: the events API behind GetEventRecorderFor (the new one
+      # writes events/v1, which changes what the envtest suite reads back),
+      # and scheme.Builder, which is how an api package registers its types
+      # and has no replacement that keeps the package's dependencies small.
+      # Both are their own change, not a side effect of another one.
+      - linters:
+          - staticcheck
+        text: "SA1019: .*(GetEventRecorderFor|scheme\\.Builder) is deprecated"
+
+      # Binding a listener is not a request. The context a ListenConfig takes
+      # bounds the bind itself, which is local and immediate; the lifetime
+      # that matters is the server's, and that is already tied to the
+      # manager's context.
+      - path: internal/proxy/server\.go
+        linters:
+          - noctx
+        text: "net.Listen must not be called"
+
+      # collectFlags walks the error tree by hand — it is the code that
+      # unwraps, including both Unwrap forms — so the type switch it does that
+      # with is the implementation of the thing errorlint asks for.
+      - path: internal/config/validate\.go
+        linters:
+          - errorlint
+        text: "type switch on error"
+
+      # The name of the Secret that holds ACME challenges, not a credential.
+      # G101 matches on the identifier containing "Secret".
+      - path: internal/acme/http01/secret\.go
+        linters:
+          - gosec
+        text: "G101"
+
+      # G710 is a taint analysis, and neither redirect it finds is open. The
+      # login flow only returns a visitor to a host the routing table already
+      # claims (ADR 0018, and see the tests beside it); the plain listener
+      # redirects to the host the request already named, over TLS (ADR 0013).
+      - path: (internal/authn/authhost\.go|internal/proxy/insecure\.go)
+        linters:
+          - gosec
+        text: "G710"
+
+      # G705 reads the ACME key authorisation as untrusted markup. It is
+      # written as text/plain (the header is set two lines above), it comes
+      # from the CA and gated's own account key, and the only reader is a
+      # validation server.
+      - path: internal/proxy/insecure\.go
+        linters:
+          - gosec
+        text: "G705"
+
+      # The stand-in identity provider is a redirector: sending the browser
+      # to the redirect_uri it was handed is the protocol, and the echo
+      # backend answers as text/plain so that a test can read what it was
+      # asked. Neither is reachable from outside a test cluster, and neither
+      # is ever built into a published image.
+      - path: hack/e2e/testsrv/main\.go
+        linters:
+          - gosec
+        text: "(G705|G710)"
+
+      # The end-to-end conditions are polled while a cluster is coming up, so
+      # a read that fails is "not yet" rather than "failed": the object is
+      # about to exist, or the API server is still starting. A condition that
+      # gave up on the first error would fail every run. The deadline is what
+      # turns a permanent failure into one.
+      - path: test/e2e/
+        linters:
+          - nilerr
+
+      # "IdP" is how the OpenID Connect specifications, and every ADR in this
+      # repository, spell identity provider. Go's initialism rule would have
+      # it IDP; matching the documents somebody reads alongside the code is
+      # worth more than matching the rule.
+      - path: internal/authn/authhost\.go
+        linters:
+          - staticcheck
+        text: "ST1003: (const|func) IdP"
+
+formatters:
+  enable:
+    - gofmt
