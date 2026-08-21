@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e || live
 
 package e2e
 
@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,12 +35,11 @@ import (
 	gatev1alpha1 "github.com/yuanying/gated/internal/apis/gate/v1alpha1"
 )
 
-// What the cluster is called and what is in it.
+// Where things live in the cluster, whichever authority a run is against.
 const (
-	clusterName = "gated-e2e"
-
-	// gatedNamespace is where gated and the test certificate authority
-	// run. It is the namespace config/manager names.
+	// gatedNamespace is where gated runs, and where a test certificate
+	// authority runs alongside it when there is one. It is the namespace
+	// config/manager names.
 	gatedNamespace = "gated-system"
 	// appNamespace holds the Ingresses and the workloads behind them, so
 	// that the tests exercise routing to somewhere other than where gated
@@ -50,35 +48,6 @@ const (
 
 	gatedImage   = "gated:e2e"
 	testsrvImage = "gated-testsrv:e2e"
-	// The ACME test server and its DNS server. They are built rather than
-	// pulled: see hack/e2e/pebble/Dockerfile for why.
-	pebbleImage       = "gated-pebble:e2e"
-	challtestsrvImage = "gated-challtestsrv:e2e"
-)
-
-// The ports hack/e2e/kind.yaml publishes on the loopback address.
-const (
-	httpPort  = 31080
-	httpsPort = 31443
-	idpPort   = 31081
-)
-
-// The names the scenarios use. They are example.com subdomains: they resolve
-// inside the test cluster, through a DNS server that answers every query with
-// gated's address, and nowhere else.
-const (
-	authHost  = "auth.example.com"
-	openHost  = "open.example.com"
-	appHost   = "app.example.com"
-	tokenHost = "token.example.com"
-
-	// idpBase is where gated reaches the stand-in identity provider, and
-	// where it sends a browser to log in. One address for both, because
-	// that is how an OAuth application is registered.
-	idpBase = "http://mock-idp.gated-e2e.svc.cluster.local:8080"
-	idpHost = "mock-idp.gated-e2e.svc.cluster.local:8080"
-
-	oauthClientID = "gated-e2e"
 )
 
 // How long the slowest thing here is given.
@@ -100,7 +69,24 @@ var (
 	// and the node's own address when they run in a container of their
 	// own.
 	clusterHost = "127.0.0.1"
+	// skipReason is why this run has nothing to do, set by a preflight
+	// that found the surroundings the layer needs to be missing. The
+	// scenarios read it and skip; a run that cannot happen is not a run
+	// that passed.
+	skipReason string
+	// cleanups undo whatever a layer made outside the cluster. A cluster
+	// goes away whole, but a name in somebody's zone does not (ADR 0025),
+	// so the layer that makes one appends the removal here.
+	cleanups []func()
 )
+
+// runCleanups undoes what a layer registered, in reverse, once the run is over.
+func runCleanups() {
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		cleanups[i]()
+	}
+	cleanups = nil
+}
 
 var scheme = runtime.NewScheme()
 
@@ -128,6 +114,17 @@ func run(m *testing.M) int {
 	}
 	repoRoot = root
 
+	// Asked before anything is created, because a layer that cannot run
+	// here must not leave a cluster behind saying so.
+	if reason, err := preflight(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	} else if reason != "" {
+		fmt.Fprintf(os.Stderr, "%s\n", reason)
+		skipReason = reason
+		return m.Run()
+	}
+
 	if err := usable(); err != nil {
 		// These tests are opt-in (`make test-e2e`) and take minutes.
 		// Somebody who asked for them wants to know why they cannot
@@ -138,6 +135,8 @@ func run(m *testing.M) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), clusterTimeout)
 	defer cancel()
+
+	defer runCleanups()
 
 	// A cluster left behind by an interrupted run holds the ports and may
 	// hold stale objects.
@@ -197,7 +196,7 @@ func createCluster(ctx context.Context) error {
 	fmt.Fprintf(os.Stderr, "creating the %q cluster\n", clusterName)
 	args := []string{"create", "cluster",
 		"--name", clusterName,
-		"--config", filepath.Join(repoRoot, "hack", "e2e", "kind.yaml"),
+		"--config", filepath.Join(repoRoot, kindConfig),
 		"--wait", "120s",
 	}
 	if _, err := kind(ctx, args...); err != nil {
@@ -340,66 +339,13 @@ func deleteCluster() {
 	_, _ = kind(ctx, "delete", "cluster", "--name", clusterName)
 }
 
-// deploy builds the images, loads them and applies everything.
-func deploy(ctx context.Context) error {
-	if err := images(ctx); err != nil {
-		return err
-	}
+// imageBuild is one image the cluster needs and the file that describes it.
+type imageBuild struct{ tag, dockerfile string }
 
-	// The namespace first: everything else is in it or refers to it.
-	if err := applyFile(ctx, "config/manager/namespace.yaml"); err != nil {
-		return err
-	}
-	// gated verifies the ACME directory it talks to like any other TLS
-	// server, so it has to be told about the test server's certificate
-	// authority. Nothing else changes about how it talks to a directory.
-	if err := applyPebbleCA(ctx); err != nil {
-		return err
-	}
-	if err := applyDir(ctx, "config/crd"); err != nil {
-		return err
-	}
-	if err := waitForCRDs(ctx); err != nil {
-		return err
-	}
-	if err := applyDir(ctx, "config/rbac"); err != nil {
-		return err
-	}
-	if err := applyFile(ctx, "config/manager/ingressclass.yaml"); err != nil {
-		return err
-	}
-	if err := applyDir(ctx, "hack/e2e/manifests"); err != nil {
-		return err
-	}
-	if err := applyGated(ctx); err != nil {
-		return err
-	}
-
-	fmt.Fprintln(os.Stderr, "waiting for the deployments")
-	for _, d := range []types.NamespacedName{
-		{Namespace: gatedNamespace, Name: "challtestsrv"},
-		{Namespace: gatedNamespace, Name: "pebble"},
-		{Namespace: appNamespace, Name: "backend"},
-		{Namespace: appNamespace, Name: "mock-idp"},
-		{Namespace: gatedNamespace, Name: "gated"},
-	} {
-		if err := waitForDeployment(ctx, d); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// images builds what the tests run and loads it into the cluster, so that no
-// node ever has to reach a registry for it.
-func images(ctx context.Context) error {
+// buildImages builds what a run needs and loads it into the cluster, so that
+// no node ever has to reach a registry for it.
+func buildImages(ctx context.Context, builds []imageBuild) error {
 	fmt.Fprintln(os.Stderr, "building images")
-	builds := []struct{ tag, dockerfile string }{
-		{gatedImage, "Dockerfile"},
-		{testsrvImage, "hack/e2e/testsrv/Dockerfile"},
-		{pebbleImage, "hack/e2e/pebble/Dockerfile"},
-		{challtestsrvImage, "hack/e2e/challtestsrv/Dockerfile"},
-	}
 	for _, b := range builds {
 		cmd := exec.CommandContext(ctx, "docker", "build",
 			// Without this the builder attaches a provenance
@@ -418,109 +364,12 @@ func images(ctx context.Context) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "loading images into the cluster")
-	for _, image := range []string{gatedImage, testsrvImage, pebbleImage, challtestsrvImage} {
-		if _, err := kind(ctx, "load", "docker-image", "--name", clusterName, image); err != nil {
+	for _, b := range builds {
+		if _, err := kind(ctx, "load", "docker-image", "--name", clusterName, b.tag); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// applyPebbleCA copies the test authority's root out of the image and puts it
-// where gated's container can read it.
-func applyPebbleCA(ctx context.Context) error {
-	pem, err := copyFromImage(ctx, pebbleImage, "/test/certs/pebble.minica.pem")
-	if err != nil {
-		return fmt.Errorf("reading the ACME test server's certificate authority: %w", err)
-	}
-	if len(bytes.TrimSpace(pem)) == 0 {
-		return errors.New("the ACME test server's image holds no certificate authority")
-	}
-
-	cm := &corev1.ConfigMap{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-		ObjectMeta: metav1.ObjectMeta{Namespace: gatedNamespace, Name: "pebble-ca"},
-		Data:       map[string]string{"ca.crt": string(pem)},
-	}
-	return createOrUpdate(ctx, cm)
-}
-
-// copyFromImage reads one file out of an image without running it.
-func copyFromImage(ctx context.Context, image, path string) ([]byte, error) {
-	created, err := exec.CommandContext(ctx, "docker", "create", image).Output()
-	if err != nil {
-		return nil, err
-	}
-	id := strings.TrimSpace(string(created))
-	defer exec.Command("docker", "rm", "-f", id).Run() //nolint:errcheck // best effort cleanup
-
-	dir, err := os.MkdirTemp("", "gated-e2e")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(dir)
-
-	local := filepath.Join(dir, filepath.Base(path))
-	if out, err := exec.CommandContext(ctx, "docker", "cp", id+":"+path, local).CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("%w\n%s", err, out)
-	}
-	return os.ReadFile(local)
-}
-
-// applyGated deploys gated from the manifest an installation would use,
-// adding the settings that name this particular deployment.
-//
-// The base manifest carries no ACME directory, no contact address, no central
-// authentication host and no identity provider, because none of those mean
-// anything outside one installation (ADR 0009). Supplying them is what an
-// overlay is for, and this is the overlay.
-func applyGated(ctx context.Context) error {
-	var deployment appsv1.Deployment
-	if err := decodeFile(filepath.Join(repoRoot, "config/manager/deployment.yaml"), &deployment); err != nil {
-		return err
-	}
-	if len(deployment.Spec.Template.Spec.Containers) != 1 {
-		return fmt.Errorf("config/manager/deployment.yaml no longer has exactly one container")
-	}
-	c := &deployment.Spec.Template.Spec.Containers[0]
-
-	c.Image = gatedImage
-	// The image is loaded into the cluster, never pulled.
-	c.ImagePullPolicy = corev1.PullIfNotPresent
-	c.Args = append(c.Args,
-		"--acme-directory-url=https://pebble:14000/dir",
-		"--acme-email=gated@example.com",
-		"--auth-host="+authHost,
-		"--github-client-id="+oauthClientID,
-		"--github-client-secret-ref="+gatedNamespace+"/github-oauth/clientSecret",
-		"--github-base-url="+idpBase,
-		"--github-api-url="+idpBase,
-		// Short enough that a test does not spend a minute waiting for
-		// a replica to notice it lost the lease.
-		"--leader-election-lease-duration=5s",
-		"--leader-election-renew-deadline=3s",
-		"--leader-election-retry-period=1s",
-		"--zap-log-level=debug",
-	)
-	c.Env = append(c.Env, corev1.EnvVar{
-		Name:  "SSL_CERT_FILE",
-		Value: "/etc/gated/acme-ca/ca.crt",
-	})
-	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-		Name:      "acme-ca",
-		MountPath: "/etc/gated/acme-ca",
-		ReadOnly:  true,
-	})
-	deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "acme-ca",
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "pebble-ca"},
-			},
-		},
-	})
-
-	return createOrUpdate(ctx, &deployment)
 }
 
 // applyDir applies every manifest in a directory, in name order.
