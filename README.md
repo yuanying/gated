@@ -17,6 +17,54 @@ ingress-nginx が deprecated になったため、その置き換えを必要と
 
 設計上の判断とその理由は [docs/adr/](docs/adr/) に記録している。
 
+## 動かし方
+
+CRD を適用する。生成物はリポジトリにコミットされているので、そのまま適用できる。
+
+```
+kubectl apply -k config/crd
+```
+
+gated 本体は起動フラグで設定する。環境固有の値には既定値が無く、指定を忘れると
+起動を拒否してフラグ名と理由を報告する（ADR 0009）。指定が必須なものは次の通り。
+
+| フラグ | 内容 |
+|---|---|
+| `--acme-directory-url` | 証明書を発行させる ACME ディレクトリの URL |
+| `--acme-email` | ACME アカウントに登録する連絡先 |
+| `--acme-account-secret` | ACME アカウント鍵を置く Secret（`namespace/name`） |
+| `--auth-host` | 中央認証ホストのホスト名（例: `auth.example.com`） |
+| `--session-key-secret` | セッション Cookie の署名鍵を置く Secret（`namespace/name`） |
+| `--challenge-secret-namespace` | HTTP-01 のチャレンジトークンを置く namespace |
+| `--leader-election-namespace` | リーダー選出の Lease を置く namespace |
+
+加えて GitHub と Google のうち少なくとも一方を設定する。どちらも未設定だと、
+未ログインのアクセスがログインへ誘導された先が行き止まりになるため、起動を拒否する。
+
+| フラグ | 内容 |
+|---|---|
+| `--github-client-id` / `--github-client-secret-ref` | GitHub OAuth アプリ（後者は `namespace/name/key`） |
+| `--google-client-id` / `--google-client-secret-ref` | Google OAuth クライアント（後者は `namespace/name/key`） |
+
+既定値を持つものは、どこで動かしても同じでよい値に限られる。リッスンアドレス
+（`--http-addr` / `--https-addr` / `--metrics-addr` / `--health-probe-addr`）、
+担当する IngressClass 名（`--ingress-class`、既定 `gated`）、リーダー選出の
+タイムアウト（`--leader-election-*`）である。全体は `gated --help` で確認できる。
+
+## 開発
+
+```
+make test          # 純関数ユニットテスト。外部依存なし
+make test-envtest  # 本物の apiserver と etcd に対する CRD の検証
+make generate      # CRD YAML と DeepCopy の再生成
+make build         # bin/gated
+```
+
+`make test` に乗るのは純関数ユニットテストだけで、それ以外の層は build tag の
+後ろにある（ADR 0007）。`make test-envtest` は必要なコントロールプレーンの
+バイナリの取得も行う。
+
 ## Status
 
-設計中。実装はこれから。
+実装中。CRD の定義、起動設定、manager の起動までが入っている。ルーティング、
+証明書の発行、認証と認可はこれから。
