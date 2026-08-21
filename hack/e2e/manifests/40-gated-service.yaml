@@ -1,0 +1,32 @@
+# gated's Service, as the end-to-end tests need it: reachable from the test
+# process through a NodePort, and at a cluster IP the manifests can name.
+#
+# This replaces config/manager/service.yaml rather than patching it. How
+# traffic reaches gated from outside is exactly the part of a deployment that
+# is a property of the cluster, so the base manifest leaves it alone and every
+# installation says it for itself; this is one such installation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gated
+  namespace: gated-system
+  labels:
+    app.kubernetes.io/name: gated
+spec:
+  type: NodePort
+  # Fixed, because the ACME server's DNS resolves every hostname in the tests
+  # to this address and is configured before the Service is created.
+  clusterIP: 10.96.100.10
+  selector:
+    app.kubernetes.io/name: gated
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 31080
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: https
+      nodePort: 31443
+      protocol: TCP

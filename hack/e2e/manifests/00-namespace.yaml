@@ -1,0 +1,9 @@
+# Where the Ingresses and the workloads behind them live.
+#
+# A namespace of their own, so that the tests exercise gated routing to
+# somewhere other than where gated itself runs. The files here are numbered
+# because they are applied in name order and some of them need this one first.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gated-e2e

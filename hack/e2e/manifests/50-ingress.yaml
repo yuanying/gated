@@ -1,0 +1,104 @@
+# The Ingresses the scenarios run against.
+#
+# Every one of them asks for a certificate through spec.tls and nothing else:
+# no annotation marks them for ACME, because the TLS block is the instruction
+# (ADR 0005). The hostnames are example.com subdomains resolved by the test
+# cluster's own DNS server and by nothing outside it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  # Reached by anyone: no NetworkRole names it, which is what fail-open means
+  # (ADR 0002).
+  name: open
+  namespace: gated-e2e
+spec:
+  ingressClassName: gated
+  tls:
+    - hosts:
+        - open.example.com
+      secretName: open-tls
+  rules:
+    - host: open.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  # The one the browser login runs against.
+  name: app
+  namespace: gated-e2e
+spec:
+  ingressClassName: gated
+  tls:
+    - hosts:
+        - app.example.com
+      secretName: app-tls
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  # The one the access tokens run against.
+  name: token
+  namespace: gated-e2e
+spec:
+  ingressClassName: gated
+  tls:
+    - hosts:
+        - token.example.com
+      secretName: token-tls
+  rules:
+    - host: token.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  # The central authentication host needs a certificate like any other host,
+  # so it needs an Ingress. What is behind it is never reached: the login
+  # paths are answered before routing (ADR 0020).
+  name: auth
+  namespace: gated-e2e
+spec:
+  ingressClassName: gated
+  tls:
+    - hosts:
+        - auth.example.com
+      secretName: auth-tls
+  rules:
+    - host: auth.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080

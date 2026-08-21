@@ -198,6 +198,25 @@ linters:
           - gosec
         text: "G705"
 
+      # The stand-in identity provider is a redirector: sending the browser
+      # to the redirect_uri it was handed is the protocol, and the echo
+      # backend answers as text/plain so that a test can read what it was
+      # asked. Neither is reachable from outside a test cluster, and neither
+      # is ever built into a published image.
+      - path: hack/e2e/testsrv/main\.go
+        linters:
+          - gosec
+        text: "(G705|G710)"
+
+      # The end-to-end conditions are polled while a cluster is coming up, so
+      # a read that fails is "not yet" rather than "failed": the object is
+      # about to exist, or the API server is still starting. A condition that
+      # gave up on the first error would fail every run. The deadline is what
+      # turns a permanent failure into one.
+      - path: test/e2e/
+        linters:
+          - nilerr
+
       # "IdP" is how the OpenID Connect specifications, and every ADR in this
       # repository, spell identity provider. Go's initialism rule would have
       # it IDP; matching the documents somebody reads alongside the code is

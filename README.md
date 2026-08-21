@@ -131,7 +131,8 @@ Identity Provider 側に登録するコールバック URL は、プロバイダ
 make test             # 純関数ユニットテスト。外部依存なし
 make test-envtest     # 本物の apiserver と etcd に対する CRD の検証
 make test-integration # Pebble とフェイク IdP に対する検証。前者には docker が要る
-make generate         # CRD YAML と DeepCopy の再生成
+make test-e2e         # kind クラスターを立てての通し確認。docker が要る
+make generate         # CRD YAML・DeepCopy・RBAC の再生成
 make build            # bin/gated
 make vet              # go vet と gofmt の検査
 make lint             # golangci-lint
@@ -144,7 +145,13 @@ make lint             # golangci-lint
 フェイクを使う。本物の認証局にも本物の Identity Provider にも接続しない。
 docker が使えない環境では ACME の分だけ skip する。
 
-golangci-lint は controller-gen / setup-envtest と同じく `go.mod` の tool
+`make test-e2e` はクラスターの生成から破棄までを自分で行う。イメージを組み立て、
+kind クラスターを作り、`config/` の manifest と E2E 用の overlay を適用し、
+Pebble とモック IdP をクラスター内に置いて、ゴールの4項目に対応するシナリオを
+回す（ADR 0024）。数分かかるので日常の開発ループには乗せない。失敗を追いたい
+ときは `GATED_E2E_KEEP_CLUSTER=1` を付けるとクラスターが残る。
+
+golangci-lint は kind / controller-gen / setup-envtest と同じく `go.mod` の tool
 ディレクティブで固定してあるので、別途インストールは要らない（ADR 0011）。
 有効にしている linter と、除外している警告とその理由は `.golangci.yml` にある。
 
@@ -300,13 +307,22 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 
 ## Status
 
-実装中。CRD の定義、起動設定、Ingress のルーティング、TLS 終端、ACME による
-証明書の取得と更新、リーダー選出、認可、認証、`AccessToken` が入っている。Ingress を
-適用すれば証明書が発行され、HTTPS でバックエンドへ転送される。`NetworkRole` と
-`NetworkRoleBinding` を適用すれば、許可されないアクセスはログインへ誘導され、
-GitHub か Google でログインした主体で改めて判定される。`AccessToken` を適用すれば
-トークンが発行され、`Authorization: Bearer` でも BASIC 認証のパスワード欄でも
-同じ主体として通る。複数レプリカで動かしても証明書の取得は重複せず、チャレンジには
-どのレプリカでも応答でき、認可と認証はどのレプリカでも成立する。
+一通り実装が入っている。CRD の定義、起動設定、Ingress のルーティング、TLS 終端、
+ACME による証明書の取得と更新、リーダー選出、認可、認証、`AccessToken`、および
+gated 自身を動かすための manifest である。
 
-kind による E2E はこれから。
+ゴールの4項目は kind 上の E2E（`make test-e2e`）で通しで確かめている。
+
+1. Ingress を適用すると `spec.tls` を見て証明書が発行され、HTTPS でバックエンドへ
+   転送される
+2. `NetworkRole` / `NetworkRoleBinding` を適用すると、未ログインのアクセスが
+   ログインへ誘導され、認証後の主体で認可が判定される。許可される主体は通り、
+   許可されない主体は 403 になる
+3. `AccessToken` で発行したトークンが `Authorization: Bearer` と BASIC 認証の
+   パスワード欄の双方で通る
+4. 複数レプリカで動かしても証明書の発行は重複せず、どのレプリカに届いても
+   ACME チャレンジに応答できる
+
+未実装なのは、`NetworkGroup`（ADR 0002）、DNS-01 solver（ADR 0005）、
+Gateway API の HTTPRoute 対応（ADR 0001）である。いずれも今回の範囲外として
+決めたものである。

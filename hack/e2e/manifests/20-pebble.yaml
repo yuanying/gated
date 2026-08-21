@@ -1,0 +1,103 @@
+# The ACME server the tests order certificates from.
+#
+# Pebble is Let's Encrypt's own test server. Nothing in this repository ever
+# contacts a real certificate authority (ADR 0007): a real one would make the
+# suite depend on the network and would spend a rate limit that takes a week
+# to come back.
+#
+# The Service is called "pebble" because that is one of the names in the
+# certificate the image ships, and gated verifies the directory it talks to
+# like any other TLS server.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pebble-config
+  namespace: gated-system
+data:
+  pebble-config.json: |
+    {
+      "pebble": {
+        "listenAddress": "0.0.0.0:14000",
+        "managementListenAddress": "0.0.0.0:15000",
+        "certificate": "/test/certs/localhost/cert.pem",
+        "privateKey": "/test/certs/localhost/key.pem",
+        "httpPort": 80,
+        "tlsPort": 5001,
+        "ocspResponderURL": "",
+        "externalAccountBindingRequired": false,
+        "domainBlocklist": [],
+        "retryAfter": {
+          "authz": 1,
+          "order": 1
+        },
+        "keyAlgorithm": "ecdsa",
+        "profiles": {
+          "default": {
+            "description": "end-to-end tests",
+            "validityPeriod": 7776000
+          }
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pebble
+  namespace: gated-system
+spec:
+  selector:
+    app.kubernetes.io/name: pebble
+  ports:
+    - name: acme
+      port: 14000
+      targetPort: 14000
+    - name: management
+      port: 15000
+      targetPort: 15000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pebble
+  namespace: gated-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pebble
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pebble
+    spec:
+      containers:
+        - name: pebble
+          image: gated-pebble:e2e
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config
+            - /etc/pebble/pebble-config.json
+            - -dnsserver
+            - 10.96.100.11:8053
+          env:
+            # Without this Pebble sleeps a random moment before each
+            # validation, which turns a short test into a long one.
+            - name: PEBBLE_VA_NOSLEEP
+              value: "1"
+            # And without this it rejects one nonce in twenty on purpose. The
+            # client retries, but the retries make a real failure harder to
+            # read for no gain here.
+            - name: PEBBLE_WFE_NONCEREJECT
+              value: "0"
+          ports:
+            - containerPort: 14000
+            - containerPort: 15000
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pebble
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: pebble-config
