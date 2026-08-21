@@ -19,6 +19,11 @@ ACME と Identity Provider ベースの認可を内蔵した Kubernetes Ingress 
 - 認可・ルーティングマッチング・証明書の更新判定は純関数ユニットテストで固める
 - CRD の Reconcile は envtest（本物の apiserver + etcd）で検証する
 - E2E は kind + Pebble + モック IdP で、シナリオを絞って書く
+- **実装が終わった際は `make lint`（golangci-lint）でチェックすること。** 警告が出たら潰す。
+  どうしても潰せないものは `.golangci.yml` に理由を添えて除外する。「とりあえず無効にする」はしない
+- `make vet`（gofmt 検査を含む）と `make test` も併せて通すこと。
+  `.claude/settings.json` の hook が `.go` の書き込みごとに `gofmt -w` をかけるが、
+  hook は自動修正で `make vet` は最後の砦であり、役割が違う
 
 ## ドキュメント
 

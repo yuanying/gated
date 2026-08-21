@@ -19,6 +19,7 @@ GO ?= go
 # go.mod, so every checkout generates byte-identical output.
 CONTROLLER_GEN ?= $(GO) tool controller-gen
 SETUP_ENVTEST ?= $(GO) tool setup-envtest
+GOLANGCI_LINT ?= $(GO) tool golangci-lint
 
 ##@ General
 
@@ -45,6 +46,14 @@ vet: fmt-check ## Run go vet over every package, including the tagged test packa
 	$(GO) vet -tags envtest ./...
 	$(GO) vet -tags integration ./...
 	$(GO) vet -tags e2e ./...
+
+.PHONY: lint
+lint: ## Run golangci-lint over every package, including the tagged test packages.
+	$(GOLANGCI_LINT) run ./...
+
+.PHONY: lint-fix
+lint-fix: ## Run golangci-lint and apply the fixes it can make itself.
+	$(GOLANGCI_LINT) run --fix ./...
 
 .PHONY: fmt
 fmt: ## Format the source tree.
