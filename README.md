@@ -179,6 +179,42 @@ golangci-lint は kind / controller-gen / setup-envtest と同じく `go.mod` �
 ディレクティブで固定してあるので、別途インストールは要らない（ADR 0011）。
 有効にしている linter と、除外している警告とその理由は `.golangci.yml` にある。
 
+## CI
+
+GitHub Actions が、PR と `main` への push のたびに回る。ジョブは上の表の
+`make` のターゲットをそのまま呼ぶだけで、CI 専用の入口は無い。赤くなったら
+同じターゲットを手元で呼べば再現する（ADR 0026）。
+
+| ジョブ | 呼ぶもの |
+|---|---|
+| no-live-layer | live 層が CI に入り込んでいないことの検査 |
+| vet | `make vet` |
+| lint | `make lint` |
+| unit | `make test` |
+| generate | `make generate` の後に差分が無いこと |
+| envtest | `make test-envtest` |
+| integration | `make test-integration` |
+| e2e | `make test-e2e` |
+
+ジョブの間に依存関係は無く、すべて同時に走る。速い層の結果が E2E の完了を
+待たずに返る。
+
+**`make verify-live` は走らない。** 実在の認証局に注文を出し、実在の DNS
+ゾーンを書き換える層であり、ADR 0025 が CI の外に置いている。書かなければ
+走らない、で済ませていない。`no-live-layer` のジョブが `.github/workflows/`
+を全文検索し、live 層の実行か、秘密情報および live 層が読む環境変数への
+参照が見つかれば、そこで落ちる。後者が二重目の歯止めになる——live 層は必要な
+値をすべて環境変数から取り、既定値を持たないので、渡すものが無ければ何にも
+到達せずに skip する（ADR 0025）。三重目として、ワークフローの権限は
+読み取りのみである。
+
+CI は秘密情報を一つも要求しない。fork からの PR でも全ジョブがそのまま走る。
+
+Go のバージョンはワークフローに書かず `go.mod` から読む。外部の action は
+commit SHA で固定してある。キャッシュは Go のモジュールとビルドのものだけで、
+キーは `go.sum` である。テストの結果や「変更が無ければ層ごと skip する」類は
+キャッシュしない。キャッシュが壊れた結果として緑になる形を作らないためである。
+
 ## 証明書
 
 Ingress の `spec.tls` がそのまま発行の指示になる。`kubernetes.io/tls-acme` の
