@@ -3,6 +3,7 @@ package authn
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -404,3 +405,6 @@ func signWith(t *testing.T, key, body []byte) string {
 	}
 	return signed
 }
+
+// errRefused stands in for a provider that would not complete a login.
+var errRefused = errors.New("the provider refused")

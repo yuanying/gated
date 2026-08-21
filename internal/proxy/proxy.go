@@ -49,6 +49,13 @@ func (s *TableStore) Load() *routing.Table {
 	return s.table.Load()
 }
 
+// HasHost reports whether any route claims this host. The login flow bounds
+// the places it will return a visitor to with this, so that the address it is
+// handed cannot be used to bounce somebody off gated to somewhere else.
+func (s *TableStore) HasHost(host string) bool {
+	return s.Load().HasHost(host)
+}
+
 // BackendResolver turns a routed backend into an address to dial.
 //
 // gated forwards to the Service's cluster IP and lets kube-proxy pick an

@@ -27,6 +27,10 @@ const (
 	CallbackPath = "/__gated/callback"
 	// NextParam carries the address to return to once the login is done.
 	NextParam = "next"
+	// BindParam carries the digest that ties the answer to this browser.
+	// The redirect is built here and the digest is checked at the
+	// callback, so the two names have to be agreed in one place.
+	BindParam = "bind"
 )
 
 // authenticateRealm is the realm offered to clients that cannot follow a
@@ -117,6 +121,12 @@ type Authorization struct {
 	// there is nowhere to send anybody, and a caller who could have logged
 	// in is challenged instead.
 	AuthHost string
+	// LoginBinding, when set, is given the response before the browser is
+	// sent away and returns a value that ties the answer to this browser.
+	// It is what makes the token that comes back usable once, and by
+	// nobody else. A nil hook starts a login that is bound to nothing,
+	// which is what stage 5 had before authentication existed.
+	LoginBinding func(w http.ResponseWriter, r *http.Request) string
 	// Log records refusals. The zero Logger discards.
 	Log logr.Logger
 }
@@ -211,7 +221,11 @@ func (a *Authorization) requireLogin(w http.ResponseWriter, r *http.Request) {
 	// The answer depends on who is asking, and a cached login redirect
 	// would be served to somebody who is already logged in.
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, a.loginURL(r), http.StatusFound)
+	binding := ""
+	if a.LoginBinding != nil {
+		binding = a.LoginBinding(w, r)
+	}
+	http.Redirect(w, r, a.loginURL(r, binding), http.StatusFound)
 }
 
 // challenge answers a client that cannot be redirected.
@@ -227,13 +241,17 @@ func challenge(w http.ResponseWriter) {
 // resource is over TLS. Whether that address may be returned to is checked on
 // the way back, against the hosts the routing table knows, so that the
 // parameter cannot be used to bounce a visitor off gated to somewhere else.
-func (a *Authorization) loginURL(r *http.Request) string {
+func (a *Authorization) loginURL(r *http.Request, binding string) string {
 	next := (&url.URL{Scheme: "https", Host: r.Host, Path: r.URL.Path, RawQuery: r.URL.RawQuery}).String()
+	query := url.Values{NextParam: []string{next}}
+	if binding != "" {
+		query.Set(BindParam, binding)
+	}
 	login := &url.URL{
 		Scheme:   "https",
 		Host:     a.AuthHost,
 		Path:     LoginPath,
-		RawQuery: url.Values{NextParam: []string{next}}.Encode(),
+		RawQuery: query.Encode(),
 	}
 	return login.String()
 }
