@@ -25,6 +25,11 @@ CRD を適用する。生成物はリポジトリにコミットされている�
 kubectl apply -k config/crd
 ```
 
+担当する IngressClass を作る。`spec.controller` は `gate.unstable.cloud/ingress-controller`
+とし、名前は `--ingress-class`（既定 `gated`）と揃える。`ingressClassName` を明示した
+Ingress を拾うだけならこのオブジェクトは無くても動くが、`ingressClassName` を持たない
+Ingress を既定として拾わせたい場合は必要になる（ADR 0012）。
+
 gated 本体は起動フラグで設定する。環境固有の値には既定値が無く、指定を忘れると
 起動を拒否してフラグ名と理由を報告する（ADR 0009）。指定が必須なものは次の通り。
 
@@ -66,5 +71,9 @@ make build         # bin/gated
 
 ## Status
 
-実装中。CRD の定義、起動設定、manager の起動までが入っている。ルーティング、
-証明書の発行、認証と認可はこれから。
+実装中。CRD の定義、起動設定、manager の起動に加えて、Ingress のルーティングと
+TLS 終端が入っている。Ingress を適用すれば、`spec.tls` が指す Secret に証明書が
+既にある限り HTTPS でバックエンドへ転送される。
+
+証明書の ACME による取得、認証と認可はこれから。それまでは 80 番の
+`/.well-known/acme-challenge/` は常に 404 を返す。
