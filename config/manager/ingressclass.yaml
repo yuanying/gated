@@ -1,0 +1,8 @@
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: gated
+  labels:
+    app.kubernetes.io/name: gated
+spec:
+  controller: gate.unstable.cloud/ingress-controller

@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - service_account.yaml
+  # role.yaml is generated from the markers in internal/controller/rbac.go by
+  # `make generate`. Edit the markers, not this file.
+  - role.yaml
+  - role_binding.yaml

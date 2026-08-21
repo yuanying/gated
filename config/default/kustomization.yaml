@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Everything gated needs to run, and nothing that names a particular
+# deployment. The flags that do — the ACME directory and contact address, the
+# central authentication host, the identity provider clients — carry no
+# defaults (ADR 0009), so this on its own starts a process that refuses to run
+# and says which flag it wants. Build an overlay on top of it that supplies
+# them; test/e2e does exactly that.
+resources:
+  - ../crd
+  - ../rbac
+  - ../manager

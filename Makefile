@@ -32,9 +32,10 @@ help: ## Show this help.
 ##@ Development
 
 .PHONY: generate
-generate: ## Regenerate DeepCopy methods and CRD manifests.
+generate: ## Regenerate DeepCopy methods, CRD manifests and the RBAC role.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./internal/apis/..."
 	$(CONTROLLER_GEN) crd paths="./internal/apis/..." output:crd:artifacts:config=config/crd
+	$(CONTROLLER_GEN) rbac:roleName=gated paths="./internal/..." output:rbac:artifacts:config=config/rbac
 
 .PHONY: build
 build: ## Build the gated binary into bin/.

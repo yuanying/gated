@@ -19,16 +19,65 @@ ingress-nginx が deprecated になったため、その置き換えを必要と
 
 ## 動かし方
 
-CRD を適用する。生成物はリポジトリにコミットされているので、そのまま適用できる。
+### 何を適用するか
+
+必要なものは `config/` にある。CRD も RBAC もリポジトリにコミットされた生成物
+なので、そのまま適用できる。
 
 ```
-kubectl apply -k config/crd
+kubectl apply -k config/default
 ```
 
-担当する IngressClass を作る。`spec.controller` は `gate.unstable.cloud/ingress-controller`
-とし、名前は `--ingress-class`（既定 `gated`）と揃える。`ingressClassName` を明示した
-Ingress を拾うだけならこのオブジェクトは無くても動くが、`ingressClassName` を持たない
-Ingress を既定として拾わせたい場合は必要になる（ADR 0012）。
+これで入るのは次のものである。namespace は `gated-system` を使う。
+
+| 種別 | 名前 | 役割 |
+|---|---|---|
+| CustomResourceDefinition | `networkroles` / `networkrolebindings` / `accesstokens` | 認可とトークンの語彙 |
+| ServiceAccount | `gated` | プロセスの身元 |
+| ClusterRole / ClusterRoleBinding | `gated` | 後述の権限 |
+| Deployment | `gated` | 本体。既定で2レプリカ |
+| Service | `gated` | ClusterIP。80 と 443 を待ち受ける |
+| IngressClass | `gated` | `spec.controller` は `gate.unstable.cloud/ingress-controller` |
+
+**これだけでは起動しない。** Deployment に書かれているのは、どのクラスターでも
+同じ意味になる設定だけである。ACME ディレクトリや中央認証ホストのように特定の
+インストールを名指しする設定は既定値を持たないので（ADR 0009）、適用する側が
+overlay で足す。足りないまま起動すると、gated は起動を拒否してどのフラグが
+足りないかを報告する。足すべきものは次節の表にある。
+
+overlay の書き方の実物は `test/e2e` にある。E2E は `config/manager/deployment.yaml`
+をそのまま読み、環境固有のフラグだけを足して適用している。
+
+IngressClass のオブジェクトは、`ingressClassName` を明示した Ingress を拾うだけ
+なら無くても動く。`ingressClassName` を持たない Ingress を既定として拾わせたい
+場合に必要になる（ADR 0012）。名前は `--ingress-class`（既定 `gated`）と揃える。
+
+外からの入り方は書かれていない。Service は ClusterIP のままである。LoadBalancer
+にするのか NodePort にするのかホストポートを使うのかは、gated の性質ではなく
+クラスターの性質なので、これも overlay で決める（ADR 0023）。
+
+### 権限
+
+ClusterRole はコードの marker から生成される。`make generate` が
+`config/rbac/role.yaml` を書き直すので、手で編集しない（ADR 0011・0023）。
+
+| API グループ | リソース | 与える操作 | 理由 |
+|---|---|---|---|
+| `networking.k8s.io` | `ingresses` / `ingressclasses` | 読むだけ | ルーティングの入力 |
+| （コア） | `services` | 読むだけ | バックエンドの cluster IP を引く |
+| （コア） | `secrets` | 読む・作る・更新する | 証明書、ACME アカウント鍵、チャレンジ、署名鍵、トークン |
+| （コア） | `events` | 作る・patch する | 発行の失敗や解決できない参照の通知 |
+| `coordination.k8s.io` | `leases` | 読む・作る・更新する | リーダー選出 |
+| `gate.unstable.cloud` | 3つの CRD | 読むだけ | 認可の判定とトークンの照合 |
+| `gate.unstable.cloud` | 3つの CRD の `/status` | 更新する | 解決結果と最終使用日時の書き戻し |
+
+Secret に `delete` は含まれていない。gated は自分が作った Secret も消さない。
+手で置いた証明書が消えないことは ADR 0005 の約束であり、権限の側からも塞いである。
+
+Ingress は全 namespace にあり、その `spec.tls` が指す Secret も全 namespace に
+あるので、この role は ClusterRole である。
+
+### 起動フラグ
 
 gated 本体は起動フラグで設定する。環境固有の値には既定値が無く、指定を忘れると
 起動を拒否してフラグ名と理由を報告する（ADR 0009）。指定が必須なものは次の通り。
@@ -64,6 +113,13 @@ Identity Provider 側に登録するコールバック URL は、プロバイダ
 `--github-api-url` / `--google-issuer`）である。最後の3つは GitHub Enterprise を
 使う場合とテスト用のモック IdP を使う場合にだけ変える（ADR 0021）。全体は
 `gated --help` で確認できる。
+
+このうち `--acme-account-secret` / `--session-key-secret` /
+`--challenge-secret-namespace` / `--leader-election-namespace` は
+`config/manager/deployment.yaml` が既に書いている。どれも「gated 自身が動いて
+いる namespace」を指すだけなので、Downward API で解決してある。overlay で足す
+必要があるのは、残りの `--acme-directory-url` / `--acme-email` / `--auth-host`
+と、Identity Provider の2〜3個である。
 
 中央認証ホストにも TLS 証明書が要るので、`--auth-host` の名前を `spec.tls` に
 含む Ingress を1つ用意する。バックエンドは何でもよい。ログインの経路は
