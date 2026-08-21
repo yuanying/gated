@@ -42,7 +42,7 @@
 
 ### 主体の語彙
 
-`NetworkRoleBinding` の `subjects` には次を書ける。識別子の形式は llm-wiki の `_access.yml` と揃える。
+`NetworkRoleBinding` の `subjects` には次を書ける。識別子は数値 ID ではなく人間が読める形とし、設定を見れば誰に許しているかが分かるようにする。
 
 | 主体 | 意味 |
 |---|---|
@@ -51,7 +51,7 @@
 | `system:authenticated` | ログイン済みであれば誰でも |
 | `system:unauthenticated` | 未ログインを含む誰でも |
 
-`system:` で始まる2つは RBAC から語彙を借りた仮想的な主体である。「誰でも読めるが書けるのは自分だけ」は、GET のみを許す `NetworkRole` を `system:unauthenticated` に、全メソッドを許す `NetworkRole` を `github:yuanying` に、それぞれ束ねることで表現する。
+`system:` で始まる2つは RBAC から語彙を借りた仮想的な主体である。「誰でも読めるが書けるのは自分だけ」は、GET のみを許す `NetworkRole` を `system:unauthenticated` に、全メソッドを許す `NetworkRole` を特定のアカウントに、それぞれ束ねることで表現する。
 
 グループは当面導入しない。実質的な利用者が一人であり、メンバー集合を使い回す必要が出ていないためである。必要になった時点で `NetworkGroup` CRD を追加し、`subjects` に `kind: Group` を足す。
 
@@ -67,7 +67,7 @@ RBAC の素直な解釈では未認証で権限が無ければ拒否だが、Web
 
 どの `NetworkRole` からも参照されていない Ingress は、認証なしで素通しする（fail-open）。
 
-llm-wiki では「visibility を書かないページは private」という fail-closed を採ったが、ここでは逆にする。llm-wiki のページは大半が非公開で公開が例外だったのに対し、この Ingress 群は大半が公開サイトで保護が例外である。既定を拒否にすると、公開したい全 Ingress に「全員に許可する」という無意味なポリシーを書くことになり、ポリシーの存在自体が意味を持たなくなる。
+既定を拒否にする設計も考えられるが、それが妥当なのは保護が原則で公開が例外である場合に限られる。Ingress で公開するものは大半が公開を目的としたサービスであり、保護が必要なものは少数である。この比率で既定を拒否にすると、公開したい全 Ingress に「全員に許可する」という無意味なポリシーを書くことになり、ポリシーの存在自体が意味を持たなくなる。
 
 ## Consequences
 

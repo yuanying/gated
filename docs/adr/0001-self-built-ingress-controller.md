@@ -5,11 +5,11 @@
 
 ## Context
 
-自宅 Kubernetes クラスターでは ingress-nginx を Ingress Controller として使ってきたが、これが deprecated となったため置き換えが必要になった。
+運用中の Kubernetes クラスターでは ingress-nginx を Ingress Controller として使ってきたが、これが deprecated となったため置き換えが必要になった。
 
 現状の構成には ingress-nginx 以外にも不満がある。証明書の自動発行は cert-manager が担い、アクセス制限は ingress-nginx の BASIC 認証アノテーションが担っている。3つの独立した仕組みが Ingress のアノテーションを介して協調しており、どれか1つの都合で他が動かなくなる。ACME の HTTP-01 チャレンジのために cert-manager が一時的な Ingress を作り、それを ingress-nginx が拾って solver Pod へルーティングする、という迂遠な経路もその一例である。
 
-置き換え先の候補としては Envoy Gateway や Traefik のような既製の実装がある。しかし今回は自作を選ぶ。移行対象の Ingress は14個しかなく、実際に使っているアノテーションもタイムアウト・ボディサイズ・BASIC 認証・SSL リダイレクトの4種類に限られる。既製品が備える機能の大半は使われない。一方で「認証を Identity Provider ベースにし、権限を Ingress の外で宣言する」という要求は既製品では素直に満たせず、結局 oauth2-proxy のような外部コンポーネントを足すことになる。
+置き換え先の候補としては Envoy Gateway や Traefik のような既製の実装がある。しかし今回は自作を選ぶ。移行対象の Ingress は数えるほどしかなく、実際に使っているアノテーションもタイムアウト・ボディサイズ・BASIC 認証・SSL リダイレクトの4種類に限られる。既製品が備える機能の大半は使われない。一方で「認証を Identity Provider ベースにし、権限を Ingress の外で宣言する」という要求は既製品では素直に満たせず、結局 oauth2-proxy のような外部コンポーネントを足すことになる。
 
 規模が小さく要求が特殊であるため、必要なものだけを持つ実装を自分で書くほうが、全体の部品数も理解のコストも小さくなると判断した。
 
@@ -41,7 +41,7 @@ controller-runtime をライブラリとして使う。informer によるキャ�
 
 部品が3つから1つになる。cert-manager と ingress-nginx が消え、それらを繋いでいたアノテーションの規約も消える。ACME のチャレンジは自分のプロキシが `/.well-known/acme-challenge/` を直接応答するため、solver Pod も一時 Ingress も不要になる。
 
-代償として、既製品が引き受けていたものをすべて自分で背負う。HTTP/2、WebSocket のアップグレード、コネクションの再利用、バックエンドのヘルスチェック、大きなリクエストボディの扱い、そしてこれらの性能特性がすべて自分の責任になる。Go の `net/http` と `httputil.ReverseProxy` は堅牢だが、ingress-nginx が積み上げてきたエッジケースの蓄積は無い。自宅クラスターの規模では性能は問題にならないと見込むが、正しさの問題は規模に関係なく出る。
+代償として、既製品が引き受けていたものをすべて自分で背負う。HTTP/2、WebSocket のアップグレード、コネクションの再利用、バックエンドのヘルスチェック、大きなリクエストボディの扱い、そしてこれらの性能特性がすべて自分の責任になる。Go の `net/http` と `httputil.ReverseProxy` は堅牢だが、ingress-nginx が積み上げてきたエッジケースの蓄積は無い。この規模では性能は問題にならないと見込むが、正しさの問題は規模に関係なく出る。
 
 Ingress を入力にしたことで既存 manifest の移行コストはほぼゼロになる一方、Ingress の表現力の限界も引き継ぐ。パスマッチングの語彙は `Exact` / `Prefix` / `ImplementationSpecific` の3つしかなく、ヘッダによる分岐や重み付けは表現できない。それが必要になった時点で Gateway API への移行を検討することになる。
 

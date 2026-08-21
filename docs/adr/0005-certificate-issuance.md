@@ -5,7 +5,7 @@
 
 ## Context
 
-現状、証明書は cert-manager が Let's Encrypt から取得している。`letsencrypt-prod` という ClusterIssuer が ACME の HTTP-01 solver として ingress-nginx を指定し、Ingress 側は `kubernetes.io/tls-acme: "true"` を付けて ingress-shim に発行を依頼している。
+現状、証明書は cert-manager が Let's Encrypt から取得している。ClusterIssuer が ACME の HTTP-01 solver として ingress-nginx を指定し、Ingress 側は `kubernetes.io/tls-acme: "true"` を付けて ingress-shim に発行を依頼している。
 
 この経路は迂遠である。cert-manager がチャレンジに応答するための一時的な Ingress と solver Pod を作り、それを ingress-nginx が拾ってルーティングし、Let's Encrypt がそこへ到達してはじめて検証が通る。Ingress Controller と cert-manager が互いの動作に依存しており、片方の設定ミスがもう片方の症状として現れる。
 
@@ -21,7 +21,7 @@ HTTP-01 のみを先に実装する。プロキシが `/.well-known/acme-challen
 
 solver は interface として切り、あとから DNS-01 を追加できるようにしておく。ワイルドカード証明書が欲しくなった場合、あるいは外部から 80 番に到達できないホストの証明書が必要になった場合に足す。
 
-DNS-01 を最初から実装しない理由は、DNS プロバイダごとの API 実装と、その認証情報の管理という別種の作業が増えるためである。現状のホストはすべて 80 番に到達可能であり、HTTP-01 で足りる。
+DNS-01 を最初から実装しない理由は、DNS プロバイダごとの API 実装と、その認証情報の管理という別種の作業が増えるためである。対象のホストはすべて 80 番に到達可能であり、HTTP-01 で足りる。
 
 ### 発行のトリガ
 
@@ -49,7 +49,7 @@ cert-manager が消える。CRD 群も、Webhook も、常駐する3つの Deplo
 
 Ingress を書くだけで証明書が付く。アノテーションの書き忘れによる「TLS を設定したのに証明書が出ない」という失敗が起きなくなる。
 
-一方で、cert-manager が持っていた機能は失われる。自己署名 CA や Vault からの発行、`Certificate` リソースによる Ingress 以外への証明書発行、CA の注入（`cert-manager.io/inject-ca-from`）はいずれも使えない。fleet-infra には現在 `inject-ca-from` を使っている箇所があるため、移行時に代替を決める必要がある。
+一方で、cert-manager が持っていた機能は失われる。自己署名 CA や Vault からの発行、`Certificate` リソースによる Ingress 以外への証明書発行、CA の注入（`cert-manager.io/inject-ca-from`）はいずれも使えない。現在 `inject-ca-from` を使っている箇所があるため、移行時に代替を決める必要がある。
 
 Let's Encrypt のレート制限に自分で対処する責任を負う。同一ドメインへの発行は週あたりの上限があり、失敗を繰り返すと締め出される。取得の失敗は指数バックオフで再試行し、失敗の回数と理由を Ingress の `status` またはイベントとして記録する。テスト時は staging ディレクトリを使う。
 
