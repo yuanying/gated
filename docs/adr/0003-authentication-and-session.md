@@ -60,3 +60,5 @@ GitHub の login 名は改名できる。改名されると権限が外れてア
 - [[0002-authorization-model]] — 確定した識別子をどう権限に結び付けるか
 - [[0004-access-token-for-non-browser-clients]] — ブラウザを持たない相手の識別
 - [[0006-high-availability]] — 署名鍵をレプリカ間で共有する
+- [[0020-where-the-login-lives]] — ログインを経路のどこに置き、handoff を一度きりにする方法
+- [[0021-what-a-connector-believes]] — コネクタが何を確かめるか

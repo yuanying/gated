@@ -51,17 +51,30 @@ gated 本体は起動フラグで設定する。環境固有の値には既定�
 | `--github-client-id` / `--github-client-secret-ref` | GitHub OAuth アプリ（後者は `namespace/name/key`） |
 | `--google-client-id` / `--google-client-secret-ref` | Google OAuth クライアント（後者は `namespace/name/key`） |
 
+Identity Provider 側に登録するコールバック URL は、プロバイダごとに1つである。
+`https://<--auth-host>/__gated/idp/github/callback` と
+`https://<--auth-host>/__gated/idp/google/callback` になる。保護対象のホストを
+増やしてもこれは変わらない（ADR 0003）。
+
 既定値を持つものは、どこで動かしても同じでよい値に限られる。リッスンアドレス
 （`--http-addr` / `--https-addr` / `--metrics-addr` / `--health-probe-addr`）、
 担当する IngressClass 名（`--ingress-class`、既定 `gated`）、リーダー選出の
-タイムアウト（`--leader-election-*`）である。全体は `gated --help` で確認できる。
+タイムアウト（`--leader-election-*`）、セッションの寿命（`--session-ttl`、既定
+12時間）、Identity Provider のエンドポイント（`--github-base-url` /
+`--github-api-url` / `--google-issuer`）である。最後の3つは GitHub Enterprise を
+使う場合とテスト用のモック IdP を使う場合にだけ変える（ADR 0021）。全体は
+`gated --help` で確認できる。
+
+中央認証ホストにも TLS 証明書が要るので、`--auth-host` の名前を `spec.tls` に
+含む Ingress を1つ用意する。バックエンドは何でもよい。ログインの経路は
+ルーティングの手前で処理されるので、そこへ転送されることはない（ADR 0020）。
 
 ## 開発
 
 ```
 make test             # 純関数ユニットテスト。外部依存なし
 make test-envtest     # 本物の apiserver と etcd に対する CRD の検証
-make test-integration # Pebble に対する ACME の検証。docker が要る
+make test-integration # Pebble とフェイク IdP に対する検証。前者には docker が要る
 make generate         # CRD YAML と DeepCopy の再生成
 make build            # bin/gated
 ```
@@ -69,8 +82,9 @@ make build            # bin/gated
 `make test` に乗るのは純関数ユニットテストだけで、それ以外の層は build tag の
 後ろにある（ADR 0007）。`make test-envtest` は必要なコントロールプレーンの
 バイナリの取得も行う。`make test-integration` は ACME のテストサーバ（Pebble）
-とその DNS サーバをコンテナとして起動する。本物の認証局には接続しない。
-docker が使えない環境では skip する。
+とその DNS サーバをコンテナとして起動し、Identity Provider はプロセス内の
+フェイクを使う。本物の認証局にも本物の Identity Provider にも接続しない。
+docker が使えない環境では ACME の分だけ skip する。
 
 ## 証明書
 
@@ -120,8 +134,38 @@ fail-open を選んでいるので、`targetRef` の書き間違いは「保護�
 できなければ警告イベントも記録する。`NetworkRoleBinding` の `RoleResolved` も同じ
 である。`kubectl describe` で両方が読める。
 
-認証（誰であるかの確定）は未実装である。現状はすべてのアクセスが未ログインとして
-判定されるので、通るのは `system:unauthenticated` に許した範囲だけになる。
+## 認証
+
+誰であるかは、GitHub か Google でのログインで確定する。ログインの入口は
+`--auth-host` で与える**中央認証ホスト**1つに集約されていて、保護対象のホストへ
+未ログインでアクセスすると、そこへ送られる（ADR 0003）。
+
+流れは次の通りである。
+
+1. 保護対象ホストが、そのホスト限定の短命な Cookie に乱数を置き、中央認証ホストへ送る
+2. 中央認証ホストが Identity Provider とやり取りして、誰であるかを確定させる
+3. 中央認証ホストが、30秒だけ有効な署名付きトークンを付けて元のホストへ戻す
+4. 元のホストがトークンと手元の乱数を突き合わせ、**そのホスト限定の**セッション Cookie を発行する
+
+3のトークンは URL に乗るが、1で置いた乱数を持つブラウザでしか使えず、使うと乱数が
+消えるので二度は使えない（ADR 0020）。戻り先として受け付けるのはルーティング
+テーブルにあるホストだけで、それ以外は拒否する（ADR 0018）。
+
+セッション Cookie に入るのは識別子と有効期限だけで、権限は入らない。権限は
+リクエストのたびに評価するので、`NetworkRoleBinding` を消せば次のリクエストから
+効く（ADR 0003）。Cookie は `HttpOnly` / `Secure` / `SameSite=Lax` が付き、
+発行したホストにしか送られない。親ドメインには広げない。
+
+署名鍵は `--session-key-secret` の Secret（`key` エントリ）に置く。無ければ
+リーダーが生成して書く。既にあるものは書き換えない。鍵を差し替えると、その
+installation の全セッションが一度に無効になる。
+
+Google は OIDC で、ID トークンの `email_verified` が真であることを必ず確認する。
+未検証のアドレスを信用すると、そのアドレスを自称する第三者に権限を与えることに
+なるためである（ADR 0003）。GitHub は OIDC を提供していないので、OAuth 2.0 の
+交換のあと `/user` でアカウント名を得る。
+
+`/__gated/` 以下のパスは gated が予約している。アプリケーションへは転送されない。
 
 ## 複数レプリカ
 
@@ -132,10 +176,12 @@ fail-open を選んでいるので、`targetRef` の書き間違いは「保護�
 |---|---|
 | Ingress などの watch とルーティングテーブルの構築 | 全レプリカ |
 | ルーティング・プロキシ・TLS 終端 | 全レプリカ |
+| ログインの受付とセッションの検証 | 全レプリカ |
 | HTTP-01 チャレンジへの応答 | 全レプリカ |
 | 権限の集合の構築と認可の判定 | 全レプリカ |
 | ACME による証明書の取得・更新 | リーダーのみ |
 | `NetworkRole` / `NetworkRoleBinding` の status 書き戻し | リーダーのみ |
+| セッション署名鍵の生成 | リーダーのみ |
 
 リーダーは Lease で選ぶ。既定で有効で、`--leader-election-namespace` が要る。
 単一レプリカで動かす場合は `--leader-elect=false` で切れる（ADR 0016）。
@@ -148,11 +194,12 @@ fail-open を選んでいるので、`targetRef` の書き間違いは「保護�
 ## Status
 
 実装中。CRD の定義、起動設定、Ingress のルーティング、TLS 終端、ACME による
-証明書の取得と更新、リーダー選出、認可が入っている。Ingress を適用すれば証明書が
-発行され、HTTPS でバックエンドへ転送される。`NetworkRole` と `NetworkRoleBinding`
-を適用すれば、許可されないアクセスはログインへ誘導されるか拒否される。複数レプリカで
-動かしても証明書の取得は重複せず、チャレンジにはどのレプリカでも応答でき、認可は
-どのレプリカでも判定される。
+証明書の取得と更新、リーダー選出、認可、認証が入っている。Ingress を適用すれば
+証明書が発行され、HTTPS でバックエンドへ転送される。`NetworkRole` と
+`NetworkRoleBinding` を適用すれば、許可されないアクセスはログインへ誘導され、
+GitHub か Google でログインした主体で改めて判定される。複数レプリカで動かしても
+証明書の取得は重複せず、チャレンジにはどのレプリカでも応答でき、認可と認証は
+どのレプリカでも成立する。
 
-認証（GitHub / Google でのログイン）と `AccessToken` はこれから。それが入るまで、
-保護されたリソースに通るのは `system:unauthenticated` に許した範囲だけである。
+`AccessToken`（ブラウザを持たないクライアント向けの `Authorization: Bearer` と
+BASIC 認証のパスワード欄）と、kind による E2E はこれから。

@@ -63,3 +63,4 @@ Bearer のチャレンジは返さない。`WWW-Authenticate: Bearer` を見た�
 - [[0007-test-strategy]] — 判定を純関数に閉じ込め、HTTP の判断を外に出す方針
 - [[0013-data-plane]] — 平文のリスナが何もしないこと
 - [[0017-authorization-evaluation-and-snapshots]] — 判定そのもの
+- [[0020-where-the-login-lives]] — 予約したパスを実際に答える側と、戻り先の検査
