@@ -1,0 +1,160 @@
+# gated CI
+#
+# The test layers are the ones ADR 0007 and ADR 0025 define, and every job
+# calls the Makefile target that already exists for its layer. CI is not an
+# entry point of its own: there is nothing here that can be run in CI but not
+# on a laptop.
+#
+# The `live` layer is the one layer with no job here. It orders certificates
+# from a real authority and edits a real DNS zone, so ADR 0025 keeps it out of
+# CI. The `no-live-layer` job below turns that from a promise into a check,
+# which is also why no comment in this file names its Makefile target.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here writes to the repository, publishes a package or comments on a
+# pull request, so the read-only default is all any job gets. A workflow that
+# needs more has to ask for it in its own job, where it is visible in review.
+permissions:
+  contents: read
+
+# A pull request that gets pushed to again drops its earlier run. Pushes to
+# main are not cancelled: every commit on main should have its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Needs no toolchain and finishes in seconds, so a workflow that would touch
+  # the live layer goes red while the heavy jobs are still starting up.
+  no-live-layer:
+    name: no live layer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Every workflow file is searched in full, comments included, so the
+      # patterns are written in the bracket form to keep this step from
+      # matching itself. `make lint` does compile the live-tagged files, which
+      # is why the second pattern looks for a test run rather than for the
+      # build tag on its own.
+      - name: No workflow runs the live layer
+        run: |
+          if grep -rnE 'verify[-]live|go test[^|;]*-tags[= ]live' .github/workflows/; then
+            echo "::error::a workflow above runs the live layer. ADR 0025 keeps it out of CI: it orders certificates from a real authority and edits a real DNS zone."
+            exit 1
+          fi
+
+      # The live layer takes every value it needs from the environment and has
+      # no defaults (ADR 0025), so a run that cannot see these skips instead of
+      # reaching anything real. Keeping them out of the workflows is also what
+      # lets pull requests from forks run the whole of CI.
+      - name: No workflow hands out credentials
+        run: |
+          if grep -rnE 'secrets[.]|GATED[_]LIVE|CLOUDFLARE[_]API[_]TOKEN' .github/workflows/; then
+            echo "::error::a workflow above reads a secret. CI is meant to run unchanged on pull requests from forks, where secrets are not available."
+            exit 1
+          fi
+
+  vet:
+    name: vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make vet
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    # Higher than the rest of the fast layers: on a cold runner golangci-lint
+    # is built from source before the first of its three passes.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make lint
+
+  test:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make test
+
+  # ADR 0011 commits the generated DeepCopy methods, CRD manifests and RBAC
+  # role. controller-gen is pinned by go.mod, so regenerating here has to
+  # reproduce what is committed, byte for byte.
+  generate:
+    name: generated artifacts are current
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make generate
+      - name: Working tree is unchanged
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git diff
+            echo "::error::regenerating changed the working tree. Run \`make generate\` and commit the result (ADR 0011)."
+            exit 1
+          fi
+
+  envtest:
+    name: envtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Downloads the apiserver and etcd binaries as part of the target
+      # (ADR 0011). They are not cached: the download is short next to the
+      # suite, and a stale copy would mean testing against a control plane
+      # nobody asked for.
+      - run: make test-envtest
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Pebble and its DNS server run as containers; the identity provider is
+      # a fake inside the test process. Neither reaches outside the runner.
+      - run: make test-integration
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Builds the image, creates the kind cluster, applies the manifests and
+      # tears it all down again (ADR 0024). Several minutes, hence its own job.
+      - run: make test-e2e
