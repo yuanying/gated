@@ -87,6 +87,42 @@ Ingress の `spec.tls` がそのまま発行の指示になる。`kubernetes.io/
 どのレプリカでも応答できる（ADR 0015）。80 番からバックエンドへ転送する経路は
 無く、チャレンジ以外はすべて HTTPS へ 308 で送られる。
 
+## アクセス制御
+
+権限は Ingress の外に置く。`NetworkRole` が「何を守り、何を許すか」を、
+`NetworkRoleBinding` が「それを誰に与えるか」を宣言する（ADR 0002）。RBAC の
+Role / RoleBinding と同じ分け方で、どちらも namespaced である。
+
+`NetworkRole` は守る対象を Ingress の名前で指す（`spec.targetRef`）。ホスト名では
+指さないので、Ingress 側でホスト名が変わっても追従する。`spec.rules` はパスと
+HTTP メソッドの組で、パスの語彙は RBAC の `nonResourceURLs` に合わせてある。完全一致、
+末尾 `*` による前方一致、`*` 単独の3つだけを受け付ける。
+
+`NetworkRoleBinding` の `subjects` に書けるのは、`github:<login名>` /
+`google:<メールアドレス>` / `system:authenticated` / `system:unauthenticated` の4つ
+である。綴りはスキーマで検証されるので、書き間違いは `kubectl apply` の時点で弾かれる
+（ADR 0010）。
+
+判定の規則は次の通り。
+
+- **どの `NetworkRole` からも参照されない Ingress は素通し**（fail-open）。公開が
+  原則で保護が例外だという前提に合わせてある
+- 複数の宣言が重なった場合は**許可の和**。拒否の規則は持たず、評価順序に依存しない
+- `NetworkRole` を書いて `NetworkRoleBinding` を書かないと、その対象は誰にも開かない。
+  保護は role から、許可は binding から来る（ADR 0017）
+- 未ログインで許可されず、ログインすれば通りうる場合はログインへ誘導する。ブラウザ
+  以外（`Accept` が HTML を求めていない相手）には 302 ではなく 401 と
+  `WWW-Authenticate: Basic` を返す。ログイン済みで許可されなければ 403（ADR 0018）
+
+fail-open を選んでいるので、`targetRef` の書き間違いは「保護したつもりのものが
+無防備」という静かな失敗になる。これを見えるようにするために、解決結果を
+`status.resolvedTargets` に、可否を `TargetResolved` condition に書き戻し、解決
+できなければ警告イベントも記録する。`NetworkRoleBinding` の `RoleResolved` も同じ
+である。`kubectl describe` で両方が読める。
+
+認証（誰であるかの確定）は未実装である。現状はすべてのアクセスが未ログインとして
+判定されるので、通るのは `system:unauthenticated` に許した範囲だけになる。
+
 ## 複数レプリカ
 
 複数レプリカで動かせる。レプリカ間で直接やりとりする経路は無く、共有するものは
@@ -97,20 +133,26 @@ Ingress の `spec.tls` がそのまま発行の指示になる。`kubernetes.io/
 | Ingress などの watch とルーティングテーブルの構築 | 全レプリカ |
 | ルーティング・プロキシ・TLS 終端 | 全レプリカ |
 | HTTP-01 チャレンジへの応答 | 全レプリカ |
+| 権限の集合の構築と認可の判定 | 全レプリカ |
 | ACME による証明書の取得・更新 | リーダーのみ |
+| `NetworkRole` / `NetworkRoleBinding` の status 書き戻し | リーダーのみ |
 
 リーダーは Lease で選ぶ。既定で有効で、`--leader-election-namespace` が要る。
 単一レプリカで動かす場合は `--leader-elect=false` で切れる（ADR 0016）。
 
-リーダーが落ちている間に止まるのは証明書の取得だけである。既にある証明書は
-Secret にあり、どのレプリカもそれで TLS を終端できるので、トラフィックは流れ
-続ける。後任は Lease が満了した時点で決まる。
+リーダーが落ちている間に止まるのは、証明書の取得と status の書き戻しだけである。
+既にある証明書は Secret にあり、どのレプリカもそれで TLS を終端できる。認可の判定も
+全レプリカが行うので、トラフィックは流れ続ける。後任は Lease が満了した時点で決まる
+（ADR 0019）。
 
 ## Status
 
 実装中。CRD の定義、起動設定、Ingress のルーティング、TLS 終端、ACME による
-証明書の取得と更新、リーダー選出が入っている。Ingress を適用すれば証明書が
-発行され、HTTPS でバックエンドへ転送される。複数レプリカで動かしても証明書の
-取得は重複せず、チャレンジにはどのレプリカでも応答できる。
+証明書の取得と更新、リーダー選出、認可が入っている。Ingress を適用すれば証明書が
+発行され、HTTPS でバックエンドへ転送される。`NetworkRole` と `NetworkRoleBinding`
+を適用すれば、許可されないアクセスはログインへ誘導されるか拒否される。複数レプリカで
+動かしても証明書の取得は重複せず、チャレンジにはどのレプリカでも応答でき、認可は
+どのレプリカでも判定される。
 
-認証と認可、`AccessToken` はこれから。
+認証（GitHub / Google でのログイン）と `AccessToken` はこれから。それが入るまで、
+保護されたリソースに通るのは `system:unauthenticated` に許した範囲だけである。
