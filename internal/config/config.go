@@ -9,6 +9,8 @@ package config
 import (
 	"flag"
 	"time"
+
+	"github.com/yuanying/gated/internal/authn/connector"
 )
 
 // Config is the complete startup configuration of a gated process.
@@ -60,9 +62,33 @@ type Auth struct {
 	// SessionKeySecret holds the HMAC key the session cookies are signed
 	// with, shared across replicas.
 	SessionKeySecret SecretRef
+	// SessionTTL is how long a session cookie stays valid. A signed cookie
+	// cannot be revoked (ADR 0003), so this is the only thing that ends
+	// one.
+	SessionTTL time.Duration
 
-	GitHub OAuthClient
-	Google OAuthClient
+	GitHub GitHubClient
+	Google GoogleClient
+}
+
+// GitHubClient is the GitHub OAuth application and the deployment of GitHub it
+// belongs to.
+type GitHubClient struct {
+	OAuthClient
+	// BaseURL is where the OAuth endpoints live. It is a setting so that
+	// GitHub Enterprise, and the mock provider the end-to-end tests run
+	// against, can be pointed at instead.
+	BaseURL string
+	// APIURL is the root of the REST API.
+	APIURL string
+}
+
+// GoogleClient is the Google OAuth client and the issuer it belongs to.
+type GoogleClient struct {
+	OAuthClient
+	// Issuer is the OpenID Connect issuer. It is a setting for the same
+	// reason as GitHub's endpoints.
+	Issuer string
 }
 
 // OAuthClient is the client registration of one identity provider.
@@ -100,6 +126,14 @@ func Default() Config {
 		MetricsAddr:     ":9090",
 		HealthProbeAddr: ":9091",
 		IngressClass:    "gated",
+		Auth: Auth{
+			SessionTTL: 12 * time.Hour,
+			GitHub: GitHubClient{
+				BaseURL: connector.DefaultGitHubBaseURL,
+				APIURL:  connector.DefaultGitHubAPIURL,
+			},
+			Google: GoogleClient{Issuer: connector.DefaultGoogleIssuer},
+		},
 		LeaderElection: LeaderElection{
 			Enabled:       true,
 			ID:            "gated-leader-election",
@@ -140,14 +174,22 @@ func (c *Config) AddFlags(fs *flag.FlagSet) {
 		"Hostname of the central authentication host, for example auth.example.com. Required.")
 	fs.Var(&c.Auth.SessionKeySecret, "session-key-secret",
 		"Secret holding the session cookie signing key, as namespace/name. Created if missing. Required.")
+	fs.DurationVar(&c.Auth.SessionTTL, "session-ttl", c.Auth.SessionTTL,
+		"How long a session cookie stays valid. A signed cookie cannot be revoked, so keep it short.")
 	fs.StringVar(&c.Auth.GitHub.ClientID, "github-client-id", c.Auth.GitHub.ClientID,
 		"OAuth client ID of the GitHub application.")
 	fs.Var(&c.Auth.GitHub.ClientSecretRef, "github-client-secret-ref",
 		"Secret entry holding the GitHub OAuth client secret, as namespace/name/key.")
+	fs.StringVar(&c.Auth.GitHub.BaseURL, "github-base-url", c.Auth.GitHub.BaseURL,
+		"Where GitHub's OAuth endpoints live. Change it for GitHub Enterprise.")
+	fs.StringVar(&c.Auth.GitHub.APIURL, "github-api-url", c.Auth.GitHub.APIURL,
+		"Root of GitHub's REST API. Change it for GitHub Enterprise.")
 	fs.StringVar(&c.Auth.Google.ClientID, "google-client-id", c.Auth.Google.ClientID,
 		"OAuth client ID of the Google application.")
 	fs.Var(&c.Auth.Google.ClientSecretRef, "google-client-secret-ref",
 		"Secret entry holding the Google OAuth client secret, as namespace/name/key.")
+	fs.StringVar(&c.Auth.Google.Issuer, "google-issuer", c.Auth.Google.Issuer,
+		"OpenID Connect issuer of the Google accounts to accept.")
 
 	fs.StringVar(&c.ChallengeSecretNamespace, "challenge-secret-namespace", c.ChallengeSecretNamespace,
 		"Namespace the ACME HTTP-01 challenge tokens are written to. Required.")

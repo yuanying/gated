@@ -139,6 +139,10 @@ func (c Config) validateAuth(report reportFunc) {
 
 	validateSecretRef(report, "session-key-secret", c.Auth.SessionKeySecret, true)
 
+	if c.Auth.SessionTTL <= 0 {
+		report("session-ttl", "must be positive")
+	}
+
 	// Every protected host that is not world-readable ends in a redirect to
 	// the central authentication host. With no provider behind it that
 	// redirect is a dead end, so refuse to start instead.
@@ -148,8 +152,34 @@ func (c Config) validateAuth(report reportFunc) {
 		return
 	}
 
-	validateOAuthClient(report, "github", c.Auth.GitHub)
-	validateOAuthClient(report, "google", c.Auth.Google)
+	validateOAuthClient(report, "github", c.Auth.GitHub.OAuthClient)
+	if !c.Auth.GitHub.IsZero() {
+		validateEndpoint(report, "github-base-url", c.Auth.GitHub.BaseURL)
+		validateEndpoint(report, "github-api-url", c.Auth.GitHub.APIURL)
+	}
+
+	validateOAuthClient(report, "google", c.Auth.Google.OAuthClient)
+	if !c.Auth.Google.IsZero() {
+		validateEndpoint(report, "google-issuer", c.Auth.Google.Issuer)
+	}
+}
+
+// validateEndpoint checks an identity provider's address. An empty one falls
+// back to the provider's own endpoints, which is what the defaults name.
+//
+// Plain HTTP is allowed so that a mock provider inside a test cluster can be
+// pointed at; a real deployment names an https address.
+func validateEndpoint(report reportFunc, flag, endpoint string) {
+	switch u, err := url.Parse(endpoint); {
+	case endpoint == "":
+		return
+	case err != nil:
+		report(flag, "%q is not a URL: %v", endpoint, err)
+	case u.Scheme != "http" && u.Scheme != "https":
+		report(flag, "%q must be an absolute http or https URL", endpoint)
+	case u.Host == "":
+		report(flag, "%q must be an absolute http or https URL", endpoint)
+	}
 }
 
 func validateAuthHost(host string) error {

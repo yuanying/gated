@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -32,6 +33,8 @@ import (
 	gatedacme "github.com/yuanying/gated/internal/acme"
 	"github.com/yuanying/gated/internal/acme/http01"
 	gatev1alpha1 "github.com/yuanying/gated/internal/apis/gate/v1alpha1"
+	"github.com/yuanying/gated/internal/authn"
+	"github.com/yuanying/gated/internal/authn/connector"
 	"github.com/yuanying/gated/internal/config"
 	"github.com/yuanying/gated/internal/controller"
 	"github.com/yuanying/gated/internal/proxy"
@@ -111,6 +114,9 @@ func run(args []string) error {
 	if err := setupAuthorizationStatus(mgr, log); err != nil {
 		return err
 	}
+	if err := setupSessionKey(mgr, cfg, log); err != nil {
+		return err
+	}
 
 	// The remaining reconcilers — tokens — are registered here as later
 	// stages add them, through a setup function of their own rather than
@@ -180,29 +186,89 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		return fmt.Errorf("registering the data plane caches: %w", err)
 	}
 
+	// Establishing who is behind a request runs on every replica too. The
+	// signing key is shared through a Secret, so any replica can verify
+	// what any other one signed and no session is tied to a Pod (ADR 0003).
+	sessionKeys := &controller.SecretEntry{
+		Client:    mgr.GetClient(),
+		Namespace: cfg.Auth.SessionKeySecret.Namespace,
+		Name:      cfg.Auth.SessionKeySecret.Name,
+		Key:       authn.SessionKeySecretEntry,
+		What:      "the session signing key",
+		Log:       log.WithName("session-key"),
+	}
+	if err := mgr.Add(sessionKeys); err != nil {
+		return fmt.Errorf("registering the session key: %w", err)
+	}
+	// A replica that cannot verify a cookie treats everybody as anonymous,
+	// which reads to a visitor as having been logged out. Keep traffic away
+	// until the key has been read.
+	if err := mgr.AddReadyzCheck("session-key", sessionKeys.Ready); err != nil {
+		return fmt.Errorf("registering the session key readiness check: %w", err)
+	}
+	keys := authn.KeyFunc(sessionKeys.Value)
+
+	connectors, err := setupConnectors(mgr, cfg, log)
+	if err != nil {
+		return err
+	}
+
+	sessions := &authn.Sessions{
+		Keys: keys,
+		TTL:  cfg.Auth.SessionTTL,
+		Log:  log.WithName("session"),
+	}
+	protected := &authn.Protected{
+		Keys:     keys,
+		Sessions: sessions,
+		Log:      log.WithName("callback"),
+	}
+	central := &authn.AuthHost{
+		Host:       cfg.Auth.Host,
+		Keys:       keys,
+		Connectors: connectors,
+		// Where a completed login may return a visitor to is bounded by
+		// the hosts something routes (ADR 0018).
+		Hosts: tables,
+		Log:   log.WithName("authhost"),
+	}
+
 	certificates := &proxy.Certificates{
 		Tables: tables,
 		Store:  &controller.SecretCertificates{Reader: mgr.GetCache()},
 		Log:    log.WithName("tls"),
 	}
 
+	dataPlane := &proxy.Handler{
+		Tables:   tables,
+		Backends: &controller.ServiceResolver{Reader: mgr.GetCache()},
+		// Authorisation runs after the route is known and before
+		// anything is forwarded. Who the caller is comes from the
+		// session cookie; the decision itself is unchanged by that,
+		// because the subject was always where it came in (ADR 0018).
+		Middleware: (&proxy.Authorization{
+			Policies: policies,
+			Subjects: sessions,
+			AuthHost: cfg.Auth.Host,
+			// Ties the token a completed login hands back to the
+			// browser that started it.
+			LoginBinding: protected.StartLogin,
+			Log:          log.WithName("authz"),
+		}).Wrap,
+		Log: log.WithName("proxy"),
+	}
+
 	servers := &proxy.Servers{
 		HTTPAddr:  cfg.HTTPAddr,
 		HTTPSAddr: cfg.HTTPSAddr,
-		Handler: &proxy.Handler{
-			Tables:   tables,
-			Backends: &controller.ServiceResolver{Reader: mgr.GetCache()},
-			// Authorisation runs after the route is known and before
-			// anything is forwarded. The subject is left unresolved
-			// until the login flow exists, so every caller is
-			// anonymous and a protected resource answers with a
-			// login or a challenge.
-			Middleware: (&proxy.Authorization{
-				Policies: policies,
-				AuthHost: cfg.Auth.Host,
-				Log:      log.WithName("authz"),
-			}).Wrap,
-			Log: log.WithName("proxy"),
+		// The login sits in front of everything else: the paths it
+		// claims are answered by gated itself and never routed,
+		// authorised or forwarded (ADR 0018).
+		Handler: &authn.Router{
+			AuthHost: cfg.Auth.Host,
+			Central:  central,
+			Callback: protected,
+			Next:     dataPlane,
 		},
 		// Answering challenges is every replica's job, not the
 		// leader's: the CA reaches whichever replica the load balancer
@@ -293,6 +359,83 @@ func setupAuthorizationStatus(mgr ctrl.Manager, log logr.Logger) error {
 	}
 	if err := bindings.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("registering the NetworkRoleBinding controller: %w", err)
+	}
+	return nil
+}
+
+// setupConnectors builds the identity providers the central authentication
+// host offers, and registers the readers of their client secrets.
+//
+// Those readers run on every replica: any replica may be the one a login comes
+// back to (ADR 0006). The secrets themselves are placed by hand, because the
+// provider issues them — unlike the session key, there is nothing gated could
+// generate.
+func setupConnectors(mgr ctrl.Manager, cfg config.Config, log logr.Logger) (*connector.Set, error) {
+	secretOf := func(ref config.SecretKeyRef, what string) (connector.SecretSource, error) {
+		entry := &controller.SecretEntry{
+			Client:    mgr.GetClient(),
+			Namespace: ref.Namespace,
+			Name:      ref.Name,
+			Key:       ref.Key,
+			What:      what,
+			Log:       log.WithName("oauth-secret"),
+		}
+		if err := mgr.Add(entry); err != nil {
+			return nil, fmt.Errorf("registering %s: %w", what, err)
+		}
+		return connector.SecretFunc(func(ctx context.Context) (string, error) {
+			value, err := entry.Value(ctx)
+			if err != nil {
+				return "", err
+			}
+			// A secret placed with --from-file carries the newline
+			// the editor left behind.
+			return strings.TrimSpace(string(value)), nil
+		}), nil
+	}
+
+	var connectors []connector.Connector
+	if !cfg.Auth.GitHub.IsZero() {
+		secret, err := secretOf(cfg.Auth.GitHub.ClientSecretRef, "the GitHub client secret")
+		if err != nil {
+			return nil, err
+		}
+		connectors = append(connectors, &connector.GitHub{
+			ClientID:     cfg.Auth.GitHub.ClientID,
+			ClientSecret: secret,
+			BaseURL:      cfg.Auth.GitHub.BaseURL,
+			APIURL:       cfg.Auth.GitHub.APIURL,
+		})
+	}
+	if !cfg.Auth.Google.IsZero() {
+		secret, err := secretOf(cfg.Auth.Google.ClientSecretRef, "the Google client secret")
+		if err != nil {
+			return nil, err
+		}
+		connectors = append(connectors, &connector.Google{
+			ClientID:     cfg.Auth.Google.ClientID,
+			ClientSecret: secret,
+			Issuer:       cfg.Auth.Google.Issuer,
+		})
+	}
+	return connector.NewSet(connectors...), nil
+}
+
+// setupSessionKey wires the runnable that writes the session signing key when
+// there is none.
+//
+// It is leader elected. Every replica has to sign with the same key, so
+// exactly one of them may decide what it is (ADR 0006); the rest read what was
+// written, through the reader registered with the data plane.
+func setupSessionKey(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error {
+	generator := &controller.SessionKeyGenerator{
+		Client:    mgr.GetClient(),
+		Namespace: cfg.Auth.SessionKeySecret.Namespace,
+		Name:      cfg.Auth.SessionKeySecret.Name,
+		Log:       log.WithName("session-key"),
+	}
+	if err := mgr.Add(generator); err != nil {
+		return fmt.Errorf("registering the session key generator: %w", err)
 	}
 	return nil
 }

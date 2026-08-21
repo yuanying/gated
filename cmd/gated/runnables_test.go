@@ -88,6 +88,11 @@ func testConfig() config.Config {
 	cfg.ACME.Email = "gated@example.com"
 	cfg.ACME.AccountSecret = config.SecretRef{Namespace: "gated-system", Name: "gated-acme-account"}
 	cfg.Auth.Host = "auth.example.com"
+	cfg.Auth.SessionKeySecret = config.SecretRef{Namespace: "gated-system", Name: "gated-session-key"}
+	cfg.Auth.GitHub.ClientID = "github-client-id"
+	cfg.Auth.GitHub.ClientSecretRef = config.SecretKeyRef{Namespace: "gated-system", Name: "github-oauth", Key: "clientSecret"}
+	cfg.Auth.Google.ClientID = "google-client-id"
+	cfg.Auth.Google.ClientSecretRef = config.SecretKeyRef{Namespace: "gated-system", Name: "google-oauth", Key: "clientSecret"}
 	return cfg
 }
 
@@ -123,6 +128,9 @@ func leaderOnlySetups() map[string]setup {
 		},
 		"setupAuthorizationStatus": func(mgr ctrl.Manager) error {
 			return setupAuthorizationStatus(mgr, logr.Discard())
+		},
+		"setupSessionKey": func(mgr ctrl.Manager) error {
+			return setupSessionKey(mgr, testConfig(), logr.Discard())
 		},
 	}
 }

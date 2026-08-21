@@ -121,3 +121,10 @@ func (s *Sessions) ttl() time.Duration {
 	}
 	return s.TTL
 }
+
+// KeyFunc adapts a function to a KeySource, so that whatever reads the Secret
+// does not have to know about this package.
+type KeyFunc func(ctx context.Context) ([]byte, error)
+
+// SigningKey calls the function.
+func (f KeyFunc) SigningKey(ctx context.Context) ([]byte, error) { return f(ctx) }

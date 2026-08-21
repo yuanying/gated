@@ -174,3 +174,9 @@ func httpClient(c *http.Client) *http.Client {
 func readBody(r *http.Response) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r.Body, maxResponseSize))
 }
+
+// SecretFunc adapts a function to a SecretSource.
+type SecretFunc func(ctx context.Context) (string, error)
+
+// Secret calls the function.
+func (f SecretFunc) Secret(ctx context.Context) (string, error) { return f(ctx) }

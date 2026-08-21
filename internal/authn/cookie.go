@@ -129,3 +129,8 @@ func MatchesBinding(nonce, binding string) bool {
 	}
 	return subtle.ConstantTimeCompare([]byte(BindingFor(nonce)), []byte(binding)) == 1
 }
+
+// SessionKeySecretEntry is the key of the Secret entry holding the signing
+// key. The Secret is shared by every replica (ADR 0006), so the name of the
+// entry has to be agreed between whoever writes it and whoever reads it.
+const SessionKeySecretEntry = "key"

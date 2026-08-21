@@ -137,20 +137,57 @@ func TestValidate(t *testing.T) {
 		{
 			name: "at least one identity provider must be configured",
 			mutate: func(c *config.Config) {
-				c.Auth.GitHub = config.OAuthClient{}
-				c.Auth.Google = config.OAuthClient{}
+				c.Auth.GitHub = config.GitHubClient{}
+				c.Auth.Google = config.GoogleClient{}
 			},
 			invalid: []string{"github-client-id", "google-client-id"},
 		},
 		{
 			name: "google alone is enough",
 			mutate: func(c *config.Config) {
-				c.Auth.GitHub = config.OAuthClient{}
-				c.Auth.Google = config.OAuthClient{
+				c.Auth.GitHub = config.GitHubClient{}
+				c.Auth.Google = config.GoogleClient{OAuthClient: config.OAuthClient{
 					ClientID:        "client-id",
 					ClientSecretRef: config.SecretKeyRef{Namespace: "gated-system", Name: "google-oauth", Key: "clientSecret"},
-				}
+				}}
 			},
+		},
+		{
+			name:    "the session lifetime must be positive",
+			mutate:  func(c *config.Config) { c.Auth.SessionTTL = 0 },
+			invalid: []string{"session-ttl"},
+		},
+		{
+			name:    "the session lifetime must not run backwards",
+			mutate:  func(c *config.Config) { c.Auth.SessionTTL = -time.Hour },
+			invalid: []string{"session-ttl"},
+		},
+		{
+			name:    "the GitHub endpoints must be absolute",
+			mutate:  func(c *config.Config) { c.Auth.GitHub.BaseURL = "github.example.com" },
+			invalid: []string{"github-base-url"},
+		},
+		{
+			name:    "the GitHub API must not be a path",
+			mutate:  func(c *config.Config) { c.Auth.GitHub.APIURL = "/api/v3" },
+			invalid: []string{"github-api-url"},
+		},
+		{
+			name:   "an empty GitHub endpoint falls back to github.com",
+			mutate: func(c *config.Config) { c.Auth.GitHub.BaseURL, c.Auth.GitHub.APIURL = "", "" },
+		},
+		{
+			name: "the Google issuer must be absolute",
+			mutate: func(c *config.Config) {
+				c.Auth.Google.ClientID = "client-id"
+				c.Auth.Google.ClientSecretRef = config.SecretKeyRef{Namespace: "gated-system", Name: "google-oauth", Key: "clientSecret"}
+				c.Auth.Google.Issuer = "accounts.example.com"
+			},
+			invalid: []string{"google-issuer"},
+		},
+		{
+			name:   "the Google issuer is not checked when Google is not configured",
+			mutate: func(c *config.Config) { c.Auth.Google.Issuer = "not a URL at all" },
 		},
 		{
 			name:    "github client id without a secret reference is incomplete",
@@ -400,10 +437,8 @@ func TestValidateErrorNamesTheFlag(t *testing.T) {
 // same configuration back.
 func TestAddFlagsRoundTrip(t *testing.T) {
 	want := validConfig()
-	want.Auth.Google = config.OAuthClient{
-		ClientID:        "google-client-id",
-		ClientSecretRef: config.SecretKeyRef{Namespace: "gated-system", Name: "google-oauth", Key: "clientSecret"},
-	}
+	want.Auth.Google.ClientID = "google-client-id"
+	want.Auth.Google.ClientSecretRef = config.SecretKeyRef{Namespace: "gated-system", Name: "google-oauth", Key: "clientSecret"}
 	want.LeaderElection.LeaseDuration = 20 * time.Second
 	want.LeaderElection.RenewDeadline = 15 * time.Second
 	want.LeaderElection.RetryPeriod = 3 * time.Second
