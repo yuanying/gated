@@ -1,0 +1,13 @@
+# Build artifacts
+/bin/
+/dist/
+gated
+
+# Test artifacts
+*.test
+coverage.out
+/testbin/
+
+# Editor / OS
+.DS_Store
+*.swp
