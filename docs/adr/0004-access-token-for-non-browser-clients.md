@@ -49,3 +49,4 @@ BASIC 認証のパスワード欄でトークンを受け付けるというこ�
 - [[0002-authorization-model]] — トークンで確定した主体を評価する仕組み
 - [[0003-authentication-and-session]] — ブラウザ経路の認証
 - [[0008-migration-from-ingress-nginx]] — BASIC 認証からの移行
+- [[0022-presenting-and-checking-a-token]] — 2つの入口の実装と、何と照合するか

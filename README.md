@@ -77,6 +77,8 @@ make test-envtest     # 本物の apiserver と etcd に対する CRD の検証
 make test-integration # Pebble とフェイク IdP に対する検証。前者には docker が要る
 make generate         # CRD YAML と DeepCopy の再生成
 make build            # bin/gated
+make vet              # go vet と gofmt の検査
+make lint             # golangci-lint
 ```
 
 `make test` に乗るのは純関数ユニットテストだけで、それ以外の層は build tag の
@@ -85,6 +87,10 @@ make build            # bin/gated
 とその DNS サーバをコンテナとして起動し、Identity Provider はプロセス内の
 フェイクを使う。本物の認証局にも本物の Identity Provider にも接続しない。
 docker が使えない環境では ACME の分だけ skip する。
+
+golangci-lint は controller-gen / setup-envtest と同じく `go.mod` の tool
+ディレクティブで固定してあるので、別途インストールは要らない（ADR 0011）。
+有効にしている linter と、除外している警告とその理由は `.golangci.yml` にある。
 
 ## 証明書
 
@@ -167,6 +173,48 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 
 `/__gated/` 以下のパスは gated が予約している。アプリケーションへは転送されない。
 
+## ブラウザを持たないクライアント
+
+`docker push` の途中でブラウザは開けない。ブラウザのリダイレクトを前提にできない
+クライアントのために、主体に紐付いた長命のトークンを `AccessToken` で発行する
+（ADR 0004）。
+
+トークンの実体を人が書くことはない。`AccessToken` に「どの主体として振る舞うか」を
+書くと、コントローラが値を生成して `Opaque` Secret の `token` エントリに書き込み、
+その参照を `status.secretRef` に返す。`spec.secretName` を省略すると `AccessToken`
+自身の名前が使われる。値の形は `gat_` に続く 32 バイトの乱数で、`gat_` という接頭辞は
+漏れたトークンをそれと分かるようにするためのものである。
+
+`spec.subject` に書けるのは `github:<login名>` か `google:<メールアドレス>` だけで、
+`system:` の主体は受け付けない。「ログインした誰か」として振る舞うトークンは、
+持っている全員に匿名の規則が与えるものを渡すだけで、トークンを必要としない。
+
+受け取り方は2つある。
+
+| 経路 | 用途 |
+|---|---|
+| `Authorization: Bearer <token>` | `curl` や API クライアント |
+| BASIC 認証の**パスワード欄** | `docker login` など BASIC 認証しか話せないクライアント |
+
+**ユーザー名欄は読まない。** 何を入れても構わない。検証していないので、そこに書いた
+名前は認証には一切関与しない（ADR 0022）。BASIC 認証の形をしているが、渡している
+のは共有パスワードではなく、個人に紐付いた失効可能なトークンである。
+
+トークンで認証されたリクエストは、`AccessToken` が宣言する主体として扱われ、
+**ブラウザ経由とまったく同じ規則で判定される**。入口が2つあるだけで、認可の
+仕組みは1つである。したがって主体が許可されていなければ 403 になる。
+
+失効させるには `AccessToken` を消す。次のリクエストから通らなくなる。Secret だけを
+消した場合はトークンが作り直される。これが値を差し替える唯一の手段でもある
+（ダイジェストから元の値は復元できない）。
+
+プロキシは Secret を読まない。照合するのは `status.tokenHash`（トークンの SHA-256）
+であって、トークンそのものではない。全 Secret をこのプロセスのメモリに置かない
+ためである（ADR 0013）。照合できたトークンはバックエンドへは転送されない。
+
+`status.lastUsedTime` に最終使用日時が記録される。使われなくなったトークンを
+見つけるためのもので、書き込みは1分に1回程度に間引かれる。精度はそのぶん粗い。
+
 ## 複数レプリカ
 
 複数レプリカで動かせる。レプリカ間で直接やりとりする経路は無く、共有するものは
@@ -179,9 +227,12 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 | ログインの受付とセッションの検証 | 全レプリカ |
 | HTTP-01 チャレンジへの応答 | 全レプリカ |
 | 権限の集合の構築と認可の判定 | 全レプリカ |
+| 有効なトークンの集合の構築と照合 | 全レプリカ |
+| `AccessToken` の `lastUsedTime` 書き戻し | 全レプリカ |
 | ACME による証明書の取得・更新 | リーダーのみ |
 | `NetworkRole` / `NetworkRoleBinding` の status 書き戻し | リーダーのみ |
 | セッション署名鍵の生成 | リーダーのみ |
+| `AccessToken` のトークン生成と Secret への書き込み | リーダーのみ |
 
 リーダーは Lease で選ぶ。既定で有効で、`--leader-election-namespace` が要る。
 単一レプリカで動かす場合は `--leader-elect=false` で切れる（ADR 0016）。
@@ -194,12 +245,12 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 ## Status
 
 実装中。CRD の定義、起動設定、Ingress のルーティング、TLS 終端、ACME による
-証明書の取得と更新、リーダー選出、認可、認証が入っている。Ingress を適用すれば
-証明書が発行され、HTTPS でバックエンドへ転送される。`NetworkRole` と
+証明書の取得と更新、リーダー選出、認可、認証、`AccessToken` が入っている。Ingress を
+適用すれば証明書が発行され、HTTPS でバックエンドへ転送される。`NetworkRole` と
 `NetworkRoleBinding` を適用すれば、許可されないアクセスはログインへ誘導され、
-GitHub か Google でログインした主体で改めて判定される。複数レプリカで動かしても
-証明書の取得は重複せず、チャレンジにはどのレプリカでも応答でき、認可と認証は
-どのレプリカでも成立する。
+GitHub か Google でログインした主体で改めて判定される。`AccessToken` を適用すれば
+トークンが発行され、`Authorization: Bearer` でも BASIC 認証のパスワード欄でも
+同じ主体として通る。複数レプリカで動かしても証明書の取得は重複せず、チャレンジには
+どのレプリカでも応答でき、認可と認証はどのレプリカでも成立する。
 
-`AccessToken`（ブラウザを持たないクライアント向けの `Authorization: Bearer` と
-BASIC 認証のパスワード欄）と、kind による E2E はこれから。
+kind による E2E はこれから。

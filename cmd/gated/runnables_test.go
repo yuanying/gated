@@ -132,6 +132,9 @@ func leaderOnlySetups() map[string]setup {
 		"setupSessionKey": func(mgr ctrl.Manager) error {
 			return setupSessionKey(mgr, testConfig(), logr.Discard())
 		},
+		"setupAccessTokens": func(mgr ctrl.Manager) error {
+			return setupAccessTokens(mgr, logr.Discard())
+		},
 	}
 }
 

@@ -85,3 +85,4 @@ TLS のリスナは `h2` と `http/1.1` を広告する。アップグレード�
 - [[0005-certificate-issuance]] — チャレンジを自分で答えること、証明書の置き場所
 - [[0006-high-availability]] — 全レプリカがプロキシすること、Secret による共有
 - [[0012-ingress-selection-and-route-precedence]] — どこへ転送するかを決める規則
+- [[0022-presenting-and-checking-a-token]] — Secret を読まずにトークンを照合する方法

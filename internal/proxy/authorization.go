@@ -316,3 +316,23 @@ func SubjectFromContext(ctx context.Context) (string, bool) {
 	subject, ok := ctx.Value(subjectContextKey).(string)
 	return subject, ok
 }
+
+// SubjectResolvers asks several resolvers in turn and takes the first identity
+// offered.
+//
+// This is how the two doors meet. A token names its caller and a session
+// cookie names its caller, and past this point nothing can tell which one did
+// (ADR 0004). The order matters only when both arrive: a token is presented on
+// purpose, a cookie is sent by the browser whether or not anybody meant it to
+// be, so the deliberate credential is the one believed.
+type SubjectResolvers []SubjectResolver
+
+// Subject returns the first non-empty answer.
+func (rs SubjectResolvers) Subject(r *http.Request) string {
+	for _, resolver := range rs {
+		if subject := resolver.Subject(r); subject != "" {
+			return subject
+		}
+	}
+	return ""
+}

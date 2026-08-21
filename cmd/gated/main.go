@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/yuanying/gated/internal/accesstoken"
 	gatedacme "github.com/yuanying/gated/internal/acme"
 	"github.com/yuanying/gated/internal/acme/http01"
 	gatev1alpha1 "github.com/yuanying/gated/internal/apis/gate/v1alpha1"
@@ -117,12 +119,9 @@ func run(args []string) error {
 	if err := setupSessionKey(mgr, cfg, log); err != nil {
 		return err
 	}
-
-	// The remaining reconcilers — tokens — are registered here as later
-	// stages add them, through a setup function of their own rather than
-	// inline: which side of ADR 0006's split a runnable falls on is
-	// checked per setup function, and one registered here directly is
-	// checked by nothing.
+	if err := setupAccessTokens(mgr, log); err != nil {
+		return err
+	}
 
 	log.Info("starting",
 		"ingressClass", cfg.IngressClass,
@@ -239,22 +238,36 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		Log:    log.WithName("tls"),
 	}
 
+	// The other way in. A token names its caller exactly as a session
+	// cookie does, and the decision that follows cannot tell the two apart
+	// — one set of rules, two doors (ADR 0004).
+	tokens, err := setupTokenSet(mgr, log)
+	if err != nil {
+		return err
+	}
+
+	decision := &proxy.Authorization{
+		Policies: policies,
+		// Asked in this order because a token is presented on purpose
+		// and a cookie is sent whether or not anybody meant it to be.
+		Subjects: proxy.SubjectResolvers{tokens, sessions},
+		AuthHost: cfg.Auth.Host,
+		// Ties the token a completed login hands back to the browser
+		// that started it.
+		LoginBinding: protected.StartLogin,
+		Log:          log.WithName("authz"),
+	}
+
 	dataPlane := &proxy.Handler{
 		Tables:   tables,
 		Backends: &controller.ServiceResolver{Reader: mgr.GetCache()},
-		// Authorisation runs after the route is known and before
-		// anything is forwarded. Who the caller is comes from the
-		// session cookie; the decision itself is unchanged by that,
-		// because the subject was always where it came in (ADR 0018).
-		Middleware: (&proxy.Authorization{
-			Policies: policies,
-			Subjects: sessions,
-			AuthHost: cfg.Auth.Host,
-			// Ties the token a completed login hands back to the
-			// browser that started it.
-			LoginBinding: protected.StartLogin,
-			Log:          log.WithName("authz"),
-		}).Wrap,
+		// Both run after the route is known and before anything is
+		// forwarded: the token is read first so that the decision has a
+		// subject to work from, and the decision itself is unchanged by
+		// where that subject came from (ADR 0018).
+		Middleware: func(next http.Handler) http.Handler {
+			return tokens.Wrap(decision.Wrap(next))
+		},
 		Log: log.WithName("proxy"),
 	}
 
@@ -436,6 +449,64 @@ func setupSessionKey(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error
 	}
 	if err := mgr.Add(generator); err != nil {
 		return fmt.Errorf("registering the session key generator: %w", err)
+	}
+	return nil
+}
+
+// setupTokenSet wires the tokens a replica accepts, and the recorder that
+// writes back when one was used.
+//
+// Neither is leader elected. Recognising a token is needed to serve a request,
+// and the replica that served it is the only one that knows it happened
+// (ADR 0006). Minting tokens is the leader's job and lives in
+// setupAccessTokens.
+func setupTokenSet(mgr ctrl.Manager, log logr.Logger) (*accesstoken.Authenticator, error) {
+	store := &accesstoken.Store{}
+	set := &controller.TokenSetReconciler{
+		Reader: mgr.GetCache(),
+		Tokens: store,
+		Log:    log.WithName("accesstoken"),
+	}
+	if err := set.SetupWithManager(mgr); err != nil {
+		return nil, fmt.Errorf("registering the access token controller: %w", err)
+	}
+	// A replica that has not read the tokens turns every valid one into an
+	// anonymous request, which the client sees as its credential being
+	// rejected. Keep traffic away until they have arrived.
+	if err := mgr.AddReadyzCheck("accesstoken", store.Ready); err != nil {
+		return nil, fmt.Errorf("registering the access token readiness check: %w", err)
+	}
+
+	uses := &accesstoken.Uses{}
+	recorder := &controller.AccessTokenUsageRecorder{
+		Client: mgr.GetClient(),
+		Uses:   uses,
+		Log:    log.WithName("accesstoken-usage"),
+	}
+	if err := mgr.Add(recorder); err != nil {
+		return nil, fmt.Errorf("registering the access token usage recorder: %w", err)
+	}
+
+	return &accesstoken.Authenticator{
+		Tokens: store,
+		Usage:  uses,
+		Log:    log.WithName("accesstoken"),
+	}, nil
+}
+
+// setupAccessTokens wires the reconciler that mints tokens.
+//
+// It is leader elected. A token is a value invented rather than derived, so
+// two replicas deciding what it is would invent two, and the second would
+// revoke the first (ADR 0006).
+func setupAccessTokens(mgr ctrl.Manager, log logr.Logger) error {
+	tokens := &controller.AccessTokenReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorderFor("gated-accesstokens"),
+		Log:      log.WithName("accesstoken"),
+	}
+	if err := tokens.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the AccessToken controller: %w", err)
 	}
 	return nil
 }
