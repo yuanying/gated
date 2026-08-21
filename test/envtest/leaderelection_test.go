@@ -13,6 +13,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
@@ -20,6 +21,7 @@ import (
 
 	gatedacme "github.com/yuanying/gated/internal/acme"
 	"github.com/yuanying/gated/internal/acme/http01"
+	gatev1alpha1 "github.com/yuanying/gated/internal/apis/gate/v1alpha1"
 	"github.com/yuanying/gated/internal/controller"
 	"github.com/yuanying/gated/internal/proxy"
 )
@@ -84,6 +86,7 @@ type replica struct {
 	name         string
 	mgr          ctrl.Manager
 	tables       *proxy.TableStore
+	policies     *proxy.PolicyStore
 	resolver     *controller.ServiceResolver
 	certificates *proxy.Certificates
 	issuer       *countingIssuer
@@ -159,6 +162,35 @@ func startReplica(t *testing.T, name, ns string) *replica {
 		t.Fatalf("registering the routing controller: %v", err)
 	}
 
+	// Deciding runs on every replica; writing back what the roles resolved
+	// to is the leader's. Both are registered here, so a status controller
+	// that forgot to wait for the lease, or a policy controller that waits
+	// for one it will never hold, shows up in these tests.
+	policies := &proxy.PolicyStore{}
+	authorization := &controller.AuthorizationReconciler{
+		Reader:   mgr.GetCache(),
+		Policies: policies,
+	}
+	if err := authorization.SetupWithManager(mgr); err != nil {
+		t.Fatalf("registering the authorisation controller: %v", err)
+	}
+	roleStatus := &controller.NetworkRoleReconciler{
+		Client:   mgr.GetClient(),
+		Reader:   mgr.GetCache(),
+		Recorder: mgr.GetEventRecorderFor("gated-authorization-" + name),
+	}
+	if err := roleStatus.SetupWithManager(mgr); err != nil {
+		t.Fatalf("registering the NetworkRole controller: %v", err)
+	}
+	bindingStatus := &controller.NetworkRoleBindingReconciler{
+		Client:   mgr.GetClient(),
+		Reader:   mgr.GetCache(),
+		Recorder: mgr.GetEventRecorderFor("gated-authorization-" + name),
+	}
+	if err := bindingStatus.SetupWithManager(mgr); err != nil {
+		t.Fatalf("registering the NetworkRoleBinding controller: %v", err)
+	}
+
 	issuer := &countingIssuer{}
 	certs := &controller.CertificateReconciler{
 		Client:       mgr.GetClient(),
@@ -175,6 +207,7 @@ func startReplica(t *testing.T, name, ns string) *replica {
 		name:     name,
 		mgr:      mgr,
 		tables:   tables,
+		policies: policies,
 		resolver: &controller.ServiceResolver{Reader: mgr.GetCache()},
 		certificates: &proxy.Certificates{
 			Tables: tables,
@@ -205,13 +238,25 @@ func (r *replica) frontend(t *testing.T, backendAddr string) *httptest.Server {
 		Tables:    r.tables,
 		Backends:  r.resolver,
 		Transport: &http.Transport{DialContext: dialer.DialContext},
+		Middleware: (&proxy.Authorization{
+			Policies: r.policies,
+			Subjects: headerSubject{},
+			AuthHost: authHost,
+		}).Wrap,
 	})
 	t.Cleanup(front.Close)
 	return front
 }
 
-// get asks a frontend for one path on one host.
+// get asks a frontend for one path on one host, as an anonymous browser.
 func get(t *testing.T, front *httptest.Server, host, path string) int {
+	t.Helper()
+	return getAs(t, front, host, path, "")
+}
+
+// getAs asks a frontend for one path on one host as a given subject, empty for
+// a caller who has not logged in.
+func getAs(t *testing.T, front *httptest.Server, host, path, subject string) int {
 	t.Helper()
 
 	req, err := http.NewRequest(http.MethodGet, front.URL+path, nil)
@@ -219,7 +264,17 @@ func get(t *testing.T, front *httptest.Server, host, path string) int {
 		t.Fatalf("building the request: %v", err)
 	}
 	req.Host = host
-	resp, err := front.Client().Do(req)
+	req.Header.Set("Accept", browserAccept)
+	if subject != "" {
+		req.Header.Set("X-Test-Subject", subject)
+	}
+	client := &http.Client{
+		Transport: front.Client().Transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("Do() = %v", err)
 	}
@@ -306,6 +361,57 @@ func TestEveryReplicaRoutesWhileOnlyOneOrders(t *testing.T) {
 	waitFor(t, "the follower to serve the certificate the leader obtained", func() bool {
 		_, err := follower.certificates.GetCertificate(clientHello(host))
 		return err == nil
+	})
+}
+
+// TestEveryReplicaAuthorisesWhileOnlyOneWritesStatus is the authorisation row
+// of the same table. A follower that cannot decide is worse than one that
+// cannot route: it does not answer 404, it serves whatever it was asked for.
+func TestEveryReplicaAuthorisesWhileOnlyOneWritesStatus(t *testing.T) {
+	ns := newNamespace(t)
+	backendAddr := newBackend(t, "from the backend")
+	newService(t, ns, "web", 80, "http")
+
+	a := startReplica(t, "a", ns)
+	b := startReplica(t, "b", ns)
+	leader, follower := awaitLeader(t, a, b)
+
+	const host = "authz-replicas.example.com"
+	tlsIngressFor(t, ns, "guarded", host, "guarded-tls")
+
+	fronts := map[*replica]*httptest.Server{
+		leader:   leader.frontend(t, backendAddr),
+		follower: follower.frontend(t, backendAddr),
+	}
+	for r, front := range fronts {
+		waitFor(t, "replica "+r.name+" to serve "+host, func() bool {
+			return get(t, front, host, "/") == http.StatusOK
+		})
+	}
+
+	newNetworkRole(t, ns, "guarded-owner", "guarded", rule([]string{"*"}, "*"))
+	newNetworkRoleBinding(t, ns, "guarded-owners", "guarded-owner", "github:octocat")
+
+	// The follower enforces it, holding no lease. Both replicas are asked,
+	// because "the leader enforces" is not the property in doubt.
+	for r, front := range fronts {
+		waitFor(t, "replica "+r.name+" to refuse an anonymous caller", func() bool {
+			return getAs(t, front, host, "/", "") == http.StatusFound
+		})
+		if got := getAs(t, front, host, "/", "github:octocat"); got != http.StatusOK {
+			t.Errorf("replica %s answered the bound subject %d, want %d", r.name, got, http.StatusOK)
+		}
+		if got := getAs(t, front, host, "/", "github:hubot"); got != http.StatusForbidden {
+			t.Errorf("replica %s answered another account %d, want %d", r.name, got, http.StatusForbidden)
+		}
+	}
+
+	// The status is written once, by whoever holds the lease. Which replica
+	// that was is not observable from the object, but that it is written at
+	// all with two of them running is.
+	waitFor(t, "the target to be resolved in the role's status", func() bool {
+		role := readRole(t, ns, "guarded-owner")
+		return meta.IsStatusConditionTrue(role.Status.Conditions, gatev1alpha1.ConditionTargetResolved)
 	})
 }
 

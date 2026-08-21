@@ -26,8 +26,10 @@ import (
 // election is switched on with more than one replica.
 //
 // So the check here is mechanical rather than a list of the runnables that
-// exist today: whatever setupDataPlane registers must be exempt from the
-// lease, and whatever setupCertificates registers must be under it.
+// exist today: whatever the data plane path registers must be exempt from the
+// lease, and whatever a leader-only path registers must be under it. A stage
+// that adds a reconciler adds it to one of those paths, and is checked by
+// having done so.
 
 // recordingManager is a manager that remembers what was registered with it.
 //
@@ -89,48 +91,82 @@ func testConfig() config.Config {
 	return cfg
 }
 
-func TestTheDataPlaneRunsOnEveryReplica(t *testing.T) {
-	mgr := newRecordingManager(t)
-	challenges := &http01.SecretStore{
-		Client:    mgr.GetClient(),
-		Namespace: testConfig().ChallengeSecretNamespace,
-	}
+// setup registers one path's runnables with a manager.
+type setup func(mgr ctrl.Manager) error
 
-	if err := setupDataPlane(mgr, testConfig(), challenges, logr.Discard()); err != nil {
-		t.Fatalf("setupDataPlane() = %v", err)
-	}
-
-	if len(mgr.added) == 0 {
-		t.Fatal("setupDataPlane registered no runnables at all")
-	}
-	for i, r := range mgr.added {
-		if underTheLease(r) {
-			t.Errorf("data plane runnable %d (%T) waits for the lease; "+
-				"every replica watches, proxies and authorises (ADR 0006), so it must "+
-				"implement NeedLeaderElection returning false", i, r)
-		}
+// dataPlaneSetups are the registration paths of the responsibilities ADR 0006
+// gives to every replica.
+func dataPlaneSetups() map[string]setup {
+	return map[string]setup{
+		"setupDataPlane": func(mgr ctrl.Manager) error {
+			cfg := testConfig()
+			challenges := &http01.SecretStore{
+				Client:    mgr.GetClient(),
+				Namespace: cfg.ChallengeSecretNamespace,
+			}
+			return setupDataPlane(mgr, cfg, challenges, logr.Discard())
+		},
 	}
 }
 
-func TestOnlyCertificateIssuanceWaitsForTheLease(t *testing.T) {
-	mgr := newRecordingManager(t)
-	challenges := &http01.SecretStore{
-		Client:    mgr.GetClient(),
-		Namespace: testConfig().ChallengeSecretNamespace,
+// leaderOnlySetups are the registration paths of the responsibilities ADR 0006
+// gives to the leader alone.
+func leaderOnlySetups() map[string]setup {
+	return map[string]setup{
+		"setupCertificates": func(mgr ctrl.Manager) error {
+			cfg := testConfig()
+			challenges := &http01.SecretStore{
+				Client:    mgr.GetClient(),
+				Namespace: cfg.ChallengeSecretNamespace,
+			}
+			return setupCertificates(mgr, cfg, challenges, logr.Discard())
+		},
+		"setupAuthorizationStatus": func(mgr ctrl.Manager) error {
+			return setupAuthorizationStatus(mgr, logr.Discard())
+		},
 	}
+}
 
-	if err := setupCertificates(mgr, testConfig(), challenges, logr.Discard()); err != nil {
-		t.Fatalf("setupCertificates() = %v", err)
-	}
+func TestTheDataPlaneRunsOnEveryReplica(t *testing.T) {
+	for name, register := range dataPlaneSetups() {
+		t.Run(name, func(t *testing.T) {
+			mgr := newRecordingManager(t)
+			if err := register(mgr); err != nil {
+				t.Fatalf("%s() = %v", name, err)
+			}
 
-	if len(mgr.added) == 0 {
-		t.Fatal("setupCertificates registered no runnables at all")
+			if len(mgr.added) == 0 {
+				t.Fatalf("%s registered no runnables at all", name)
+			}
+			for i, r := range mgr.added {
+				if underTheLease(r) {
+					t.Errorf("data plane runnable %d (%T) waits for the lease; "+
+						"every replica watches, proxies and authorises (ADR 0006), so it must "+
+						"implement NeedLeaderElection returning false", i, r)
+				}
+			}
+		})
 	}
-	for i, r := range mgr.added {
-		if !underTheLease(r) {
-			t.Errorf("certificate runnable %d (%T) runs on every replica; "+
-				"ordering is the leader's alone (ADR 0006), or the same certificate "+
-				"is ordered once per replica", i, r)
-		}
+}
+
+func TestOnlyTheLeadersWorkWaitsForTheLease(t *testing.T) {
+	for name, register := range leaderOnlySetups() {
+		t.Run(name, func(t *testing.T) {
+			mgr := newRecordingManager(t)
+			if err := register(mgr); err != nil {
+				t.Fatalf("%s() = %v", name, err)
+			}
+
+			if len(mgr.added) == 0 {
+				t.Fatalf("%s registered no runnables at all", name)
+			}
+			for i, r := range mgr.added {
+				if !underTheLease(r) {
+					t.Errorf("leader-only runnable %d (%T) runs on every replica; "+
+						"ordering certificates and writing status back are the leader's "+
+						"alone (ADR 0006), or every replica repeats the same work", i, r)
+				}
+			}
+		})
 	}
 }

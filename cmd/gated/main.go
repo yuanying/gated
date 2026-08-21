@@ -108,12 +108,15 @@ func run(args []string) error {
 	if err := setupCertificates(mgr, cfg, challenges, log); err != nil {
 		return err
 	}
+	if err := setupAuthorizationStatus(mgr, log); err != nil {
+		return err
+	}
 
-	// The remaining reconcilers — authorisation, tokens — are registered
-	// here as later stages add them, through a setup function of their
-	// own rather than inline: which side of ADR 0006's split a runnable
-	// falls on is checked per setup function, and one registered here
-	// directly is checked by nothing.
+	// The remaining reconcilers — tokens — are registered here as later
+	// stages add them, through a setup function of their own rather than
+	// inline: which side of ADR 0006's split a runnable falls on is
+	// checked per setup function, and one registered here directly is
+	// checked by nothing.
 
 	log.Info("starting",
 		"ingressClass", cfg.IngressClass,
@@ -152,6 +155,24 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		return fmt.Errorf("registering the routing controller: %w", err)
 	}
 
+	// Deciding is every replica's job too. Writing back what the roles
+	// resolved to is not, and lives in setupAuthorizationStatus.
+	policies := &proxy.PolicyStore{}
+	authorization := &controller.AuthorizationReconciler{
+		Reader:   mgr.GetCache(),
+		Policies: policies,
+	}
+	if err := authorization.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the authorisation controller: %w", err)
+	}
+	// A replica that has not read the permissions cannot tell an
+	// unprotected resource from one it has not heard of, so it is not
+	// ready to be sent traffic. Requests that arrive anyway are refused
+	// rather than served (see proxy.Authorization).
+	if err := mgr.AddReadyzCheck("authorization", policies.Ready); err != nil {
+		return fmt.Errorf("registering the authorisation readiness check: %w", err)
+	}
+
 	// Services and certificates are read while a request is being served,
 	// not from a reconciler, so nothing else would start their informers.
 	// Without this the first request of each kind waits for a full list.
@@ -171,7 +192,17 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		Handler: &proxy.Handler{
 			Tables:   tables,
 			Backends: &controller.ServiceResolver{Reader: mgr.GetCache()},
-			Log:      log.WithName("proxy"),
+			// Authorisation runs after the route is known and before
+			// anything is forwarded. The subject is left unresolved
+			// until the login flow exists, so every caller is
+			// anonymous and a protected resource answers with a
+			// login or a challenge.
+			Middleware: (&proxy.Authorization{
+				Policies: policies,
+				AuthHost: cfg.Auth.Host,
+				Log:      log.WithName("authz"),
+			}).Wrap,
+			Log: log.WithName("proxy"),
 		},
 		// Answering challenges is every replica's job, not the
 		// leader's: the CA reaches whichever replica the load balancer
@@ -230,6 +261,38 @@ func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.St
 	}
 	if err := certificates.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("registering the certificate controller: %w", err)
+	}
+	return nil
+}
+
+// setupAuthorizationStatus wires the two reconcilers that write back what the
+// authorisation resources resolved to.
+//
+// They are leader elected. Every replica decides, but the status they would
+// write is the same on all of them, so letting each replica write it would
+// multiply the writes and — worse — the events by the number of replicas,
+// without any replica learning anything the others did not (ADR 0006).
+func setupAuthorizationStatus(mgr ctrl.Manager, log logr.Logger) error {
+	recorder := mgr.GetEventRecorderFor("gated-authorization")
+
+	roles := &controller.NetworkRoleReconciler{
+		Client:   mgr.GetClient(),
+		Reader:   mgr.GetCache(),
+		Recorder: recorder,
+		Log:      log.WithName("networkrole"),
+	}
+	if err := roles.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the NetworkRole controller: %w", err)
+	}
+
+	bindings := &controller.NetworkRoleBindingReconciler{
+		Client:   mgr.GetClient(),
+		Reader:   mgr.GetCache(),
+		Recorder: recorder,
+		Log:      log.WithName("networkrolebinding"),
+	}
+	if err := bindings.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the NetworkRoleBinding controller: %w", err)
 	}
 	return nil
 }
