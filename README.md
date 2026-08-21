@@ -59,21 +59,39 @@ gated 本体は起動フラグで設定する。環境固有の値には既定�
 ## 開発
 
 ```
-make test          # 純関数ユニットテスト。外部依存なし
-make test-envtest  # 本物の apiserver と etcd に対する CRD の検証
-make generate      # CRD YAML と DeepCopy の再生成
-make build         # bin/gated
+make test             # 純関数ユニットテスト。外部依存なし
+make test-envtest     # 本物の apiserver と etcd に対する CRD の検証
+make test-integration # Pebble に対する ACME の検証。docker が要る
+make generate         # CRD YAML と DeepCopy の再生成
+make build            # bin/gated
 ```
 
 `make test` に乗るのは純関数ユニットテストだけで、それ以外の層は build tag の
 後ろにある（ADR 0007）。`make test-envtest` は必要なコントロールプレーンの
-バイナリの取得も行う。
+バイナリの取得も行う。`make test-integration` は ACME のテストサーバ（Pebble）
+とその DNS サーバをコンテナとして起動する。本物の認証局には接続しない。
+docker が使えない環境では skip する。
+
+## 証明書
+
+Ingress の `spec.tls` がそのまま発行の指示になる。`kubernetes.io/tls-acme` の
+ようなアノテーションは要らない（ADR 0005）。`spec.tls[].hosts` の証明書を
+取得し、`spec.tls[].secretName` の Secret（`kubernetes.io/tls` 型）へ書く。
+
+`secretName` の Secret に有効な証明書が既にあれば取りにいかない。手で置いた
+証明書はそのまま使われる。更新は有効期間の 1/3 を切った時点で、ただし最低でも
+期限の30日前に始まる（ADR 0014）。更新に失敗しても既存の証明書は書き換えず、
+失敗の理由と連続回数は Ingress のイベントとして記録される。
+
+チャレンジは HTTP-01 のみを使う。80 番の `/.well-known/acme-challenge/` は
+どのレプリカでも応答できる（ADR 0015）。80 番からバックエンドへ転送する経路は
+無く、チャレンジ以外はすべて HTTPS へ 308 で送られる。
 
 ## Status
 
-実装中。CRD の定義、起動設定、manager の起動に加えて、Ingress のルーティングと
-TLS 終端が入っている。Ingress を適用すれば、`spec.tls` が指す Secret に証明書が
-既にある限り HTTPS でバックエンドへ転送される。
+実装中。CRD の定義、起動設定、Ingress のルーティング、TLS 終端、ACME による
+証明書の取得と更新が入っている。Ingress を適用すれば証明書が発行され、HTTPS で
+バックエンドへ転送される。
 
-証明書の ACME による取得、認証と認可はこれから。それまでは 80 番の
-`/.well-known/acme-challenge/` は常に 404 を返す。
+認証と認可、`AccessToken` はこれから。証明書の取得をリーダーに限定する
+リーダー選出（ADR 0006）も未実装で、現状はすべてのレプリカが取得しにいく。
