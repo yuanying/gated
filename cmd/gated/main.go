@@ -7,23 +7,42 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	gatev1alpha1 "github.com/yuanying/gated/internal/apis/gate/v1alpha1"
 	"github.com/yuanying/gated/internal/config"
+	"github.com/yuanying/gated/internal/controller"
+	"github.com/yuanying/gated/internal/proxy"
+)
+
+// gracefulShutdownTimeout is how long the manager waits for its runnables to
+// return once the process is asked to stop, and proxyDrainTimeout is how long
+// the listeners spend draining inside that. The listeners have to finish
+// first, or the manager gives up on them mid-drain.
+const (
+	gracefulShutdownTimeout = 30 * time.Second
+	proxyDrainTimeout       = 25 * time.Second
 )
 
 // scheme carries every type the process reads or writes. Ingress and Secret
@@ -78,8 +97,12 @@ func run(args []string) error {
 		return fmt.Errorf("registering the readiness check: %w", err)
 	}
 
-	// Reconcilers and the proxy are registered here as later stages add
-	// them. The manager already knows how to start and stop them.
+	if err := setupDataPlane(mgr, cfg, log); err != nil {
+		return err
+	}
+
+	// The remaining reconcilers — certificates, authorisation, tokens — are
+	// registered here as later stages add them.
 
 	log.Info("starting",
 		"ingressClass", cfg.IngressClass,
@@ -100,6 +123,71 @@ func run(args []string) error {
 	return nil
 }
 
+// setupDataPlane wires the routing table, the reverse proxy and the two
+// listeners into the manager.
+//
+// Everything here runs on every replica. Only certificate issuance is the
+// leader's job (ADR 0006), so nothing in this path may be gated on the lease:
+// a replica that loses it must keep serving traffic.
+func setupDataPlane(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error {
+	tables := &proxy.TableStore{}
+
+	routes := &controller.RoutingReconciler{
+		Reader:       mgr.GetCache(),
+		IngressClass: cfg.IngressClass,
+		Tables:       tables,
+	}
+	if err := routes.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the routing controller: %w", err)
+	}
+
+	// Services and certificates are read while a request is being served,
+	// not from a reconciler, so nothing else would start their informers.
+	// Without this the first request of each kind waits for a full list.
+	if err := mgr.Add(warmUpCache(mgr, &corev1.Service{}, &corev1.Secret{})); err != nil {
+		return fmt.Errorf("registering the data plane caches: %w", err)
+	}
+
+	certificates := &proxy.Certificates{
+		Tables: tables,
+		Store:  &controller.SecretCertificates{Reader: mgr.GetCache()},
+		Log:    log.WithName("tls"),
+	}
+
+	servers := &proxy.Servers{
+		HTTPAddr:  cfg.HTTPAddr,
+		HTTPSAddr: cfg.HTTPSAddr,
+		Handler: &proxy.Handler{
+			Tables:   tables,
+			Backends: &controller.ServiceResolver{Reader: mgr.GetCache()},
+			Log:      log.WithName("proxy"),
+		},
+		// Certificate issuance arrives in a later stage; until then the
+		// plain listener answers no ACME challenge and forwards nothing.
+		InsecureHandler: &proxy.InsecureHandler{Log: log.WithName("http")},
+		TLSConfig:       certificates.TLSConfig(),
+		ShutdownTimeout: proxyDrainTimeout,
+		Log:             log.WithName("servers"),
+	}
+	if err := mgr.Add(servers); err != nil {
+		return fmt.Errorf("registering the listeners: %w", err)
+	}
+	return nil
+}
+
+// warmUpCache starts the informers for a set of kinds before anything asks
+// them for an object.
+func warmUpCache(mgr ctrl.Manager, objs ...client.Object) manager.Runnable {
+	return manager.RunnableFunc(func(ctx context.Context) error {
+		for _, obj := range objs {
+			if _, err := mgr.GetCache().GetInformer(ctx, obj); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // managerOptions translates the startup configuration into the manager's own
 // options.
 //
@@ -112,6 +200,16 @@ func managerOptions(cfg config.Config) ctrl.Options {
 		Scheme:                  scheme,
 		Metrics:                 metricsserver.Options{BindAddress: cfg.MetricsAddr},
 		HealthProbeBindAddress:  cfg.HealthProbeAddr,
+		GracefulShutdownTimeout: ptr.To(gracefulShutdownTimeout),
+		Cache:                   cacheOptions(),
+		Client: client.Options{
+			// Reads of Secrets bypass the cache. The cache holds only
+			// TLS Secrets, so serving an Opaque Secret from it would
+			// answer "not found" for something that exists. Later
+			// stages read the ACME account key and the session key
+			// through this client and must not fall into that.
+			Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}},
+		},
 		LeaderElection:          cfg.LeaderElection.Enabled,
 		LeaderElectionID:        cfg.LeaderElection.ID,
 		LeaderElectionNamespace: cfg.LeaderElection.Namespace,
@@ -125,4 +223,20 @@ func managerOptions(cfg config.Config) ctrl.Options {
 		opts.RetryPeriod = &cfg.LeaderElection.RetryPeriod
 	}
 	return opts
+}
+
+// cacheOptions restricts what the informers hold.
+//
+// Secrets are the expensive kind: caching all of them means keeping every
+// credential in the cluster in memory. gated needs exactly one class of Secret
+// while serving a request — the certificates it terminates TLS with — so that
+// is the only class it caches.
+func cacheOptions() cache.Options {
+	return cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {
+				Field: fields.OneTermEqualSelector("type", string(corev1.SecretTypeTLS)),
+			},
+		},
+	}
 }
