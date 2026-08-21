@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,7 +36,13 @@ import (
 // suite at the committed output means a stale commit fails the suite.
 const crdDir = "../../config/crd"
 
-var k8sClient client.Client
+var (
+	k8sClient client.Client
+	// restCfg and testScheme let a test build its own manager against the
+	// same control plane.
+	restCfg    *rest.Config
+	testScheme *runtime.Scheme
+)
 
 func TestMain(m *testing.M) {
 	os.Exit(runSuite(m))
@@ -61,11 +68,13 @@ func runSuite(m *testing.M) int {
 		}
 	}()
 
-	scheme := runtime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(gatev1alpha1.AddToScheme(scheme))
+	restCfg = cfg
 
-	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
+	testScheme = runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(testScheme))
+	utilruntime.Must(gatev1alpha1.AddToScheme(testScheme))
+
+	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "building the client: %v\n", err)
 		return 1
