@@ -355,8 +355,12 @@ func (a *AuthHost) chooser(w http.ResponseWriter, next *url.URL, binding string)
 }
 
 // redirectURI is the one address each provider is told to return to.
+//
+// The host is spelled as configured, port and all: this string has to match
+// what was registered with the provider byte for byte, so the port cannot be
+// dropped the way a comparison would drop it.
 func (a *AuthHost) redirectURI(provider string) string {
-	return "https://" + routing.CanonicalHost(a.Host) + IdPCallbackPath(provider)
+	return "https://" + strings.ToLower(strings.TrimSuffix(a.Host, ".")) + IdPCallbackPath(provider)
 }
 
 func (a *AuthHost) now() time.Time {
