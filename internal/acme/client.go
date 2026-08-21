@@ -121,7 +121,7 @@ func (c *Client) Obtain(ctx context.Context, hosts []string) (*Keypair, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building the certificate request: %w", err)
 	}
-	der, err := finalize(ctx, client, orderURL, order.FinalizeURL, csr)
+	der, via, err := finalize(ctx, client, orderURL, order.FinalizeURL, csr)
 	if err != nil {
 		return nil, err
 	}
@@ -130,11 +130,26 @@ func (c *Client) Obtain(ctx context.Context, hosts []string) (*Keypair, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.Log.Info("obtained a certificate", "hosts", wanted)
+	c.Log.Info("obtained a certificate", "hosts", wanted, "collectedVia", via)
 	return keypair, nil
 }
 
-// finalize submits the request and collects the issued chain.
+// How the issued chain was collected. Which of the two happens is a property
+// of the directory rather than of gated, and the two are told apart in the log
+// because only one of them is ever reached against any one directory: the
+// end-to-end suite exercises the second and nothing but the second, and the
+// live layer exists to reach the first (ADR 0025).
+const (
+	// viaFinalize: the finalize response named the order, and the ordinary
+	// call carried it through to the certificate.
+	viaFinalize = "finalize"
+	// viaOrder: it did not, and the order this process opened was polled
+	// instead.
+	viaOrder = "order"
+)
+
+// finalize submits the request and collects the issued chain, reporting which
+// of the two ways above got it.
 //
 // The straightforward call does both, but it polls the order at the URL the
 // finalize response hands back in a Location header, and a directory is not
@@ -143,21 +158,21 @@ func (c *Client) Obtain(ctx context.Context, hosts []string) (*Keypair, error) {
 // on that failure the order is polled directly and the certificate collected
 // from it. An order that is genuinely unfinished comes back without a
 // certificate, and the original failure is what is reported.
-func finalize(ctx context.Context, client *xacme.Client, orderURL, finalizeURL string, csr []byte) ([][]byte, error) {
+func finalize(ctx context.Context, client *xacme.Client, orderURL, finalizeURL string, csr []byte) ([][]byte, string, error) {
 	der, _, err := client.CreateOrderCert(ctx, finalizeURL, csr, true)
 	if err == nil {
-		return der, nil
+		return der, viaFinalize, nil
 	}
 
 	issued, waitErr := client.WaitOrder(ctx, orderURL)
 	if waitErr != nil || issued.CertURL == "" {
-		return nil, fmt.Errorf("finalizing the order: %w", err)
+		return nil, "", fmt.Errorf("finalizing the order: %w", err)
 	}
 	der, fetchErr := client.FetchCert(ctx, issued.CertURL, true)
 	if fetchErr != nil {
-		return nil, fmt.Errorf("collecting the issued certificate: %w", fetchErr)
+		return nil, "", fmt.Errorf("collecting the issued certificate: %w", fetchErr)
 	}
-	return der, nil
+	return der, viaOrder, nil
 }
 
 // authorize takes one authorization from pending to valid, recording in
