@@ -193,6 +193,10 @@ func setStatus(t *testing.T, obj *unstructured.Unstructured, status map[string]a
 type tokenFixture struct {
 	front   *httptest.Server
 	backend *echoBackend
+	// tokens and policies are the two snapshots a replica has to have read
+	// before it is ready to be sent traffic.
+	tokens   *accesstoken.Store
+	policies *proxy.PolicyStore
 }
 
 // echoBackend reports the credentials it was given, so that a test can assert
@@ -313,7 +317,7 @@ func startTokens(t *testing.T, ns string, backend *echoBackend) *tokenFixture {
 		t.Fatal("the cache never synced")
 	}
 
-	fixture := &tokenFixture{backend: backend}
+	fixture := &tokenFixture{backend: backend, tokens: tokens, policies: policies}
 	if backend != nil {
 		dialer := &dialRecorder{to: backend.addr}
 		authenticator := &accesstoken.Authenticator{Tokens: tokens, Usage: uses}
@@ -468,6 +472,24 @@ func TestAccessTokenIsMintedIntoASecret(t *testing.T) {
 	if got := accesstoken.Hash(rotated); got != rotatedHash {
 		t.Errorf("status.tokenHash = %q, want the digest of the rotated token %q", rotatedHash, got)
 	}
+}
+
+// A replica in a cluster where nothing has been declared still becomes ready.
+//
+// Both snapshots are rebuilt from watches, and a watch of an empty kind fires
+// nothing, so without a first pass of its own a replica would sit at
+// not-ready waiting for an object that may never be created. Readiness gates
+// traffic (ADR 0006), so that is an installation that never serves anything.
+func TestSnapshotsAreLoadedWithNothingDeclared(t *testing.T) {
+	ns := newNamespace(t)
+	fixture := startTokens(t, ns, nil)
+
+	waitFor(t, "the token set to be loaded", func() bool {
+		return fixture.tokens.Ready(nil) == nil
+	})
+	waitFor(t, "the permissions to be loaded", func() bool {
+		return fixture.policies.Ready(nil) == nil
+	})
 }
 
 // TestAccessTokenOpensBothDoors is the requirement of ADR 0004 in one test:

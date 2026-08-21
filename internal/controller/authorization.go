@@ -86,6 +86,9 @@ func (r *AuthorizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// An Ingress appearing or going away changes which roles resolve,
 		// and so which resources are protected at all.
 		Watches(&networkingv1.Ingress{}, rebuild).
+		// A cluster where nobody has declared a role produces no
+		// watch event at all, and the snapshot gates readiness.
+		WatchesRawSource(startupSource{request: rebuildPolicies}).
 		WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)}).
 		Complete(r)
 }

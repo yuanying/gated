@@ -314,6 +314,9 @@ func (r *TokenSetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return []reconcile.Request{rebuildTokens}
 			},
 		)).
+		// A cluster with no AccessToken in it produces no watch event
+		// at all, and the snapshot gates readiness.
+		WatchesRawSource(startupSource{request: rebuildTokens}).
 		WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)}).
 		Complete(r)
 }

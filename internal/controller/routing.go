@@ -82,6 +82,10 @@ func (r *RoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("routing").
 		Watches(&networkingv1.Ingress{}, rebuild).
 		Watches(&networkingv1.IngressClass{}, rebuild).
+		// A cluster with no Ingress in it produces no watch event at
+		// all, and a table that was never built is not the same thing
+		// as one that is empty.
+		WatchesRawSource(startupSource{request: rebuildRequest}).
 		WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)}).
 		Complete(r)
 }
