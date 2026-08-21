@@ -215,6 +215,52 @@ commit SHA で固定してある。キャッシュは Go のモジュールと�
 キーは `go.sum` である。テストの結果や「変更が無ければ層ごと skip する」類は
 キャッシュしない。キャッシュが壊れた結果として緑になる形を作らないためである。
 
+## 依存の更新
+
+固定した依存は、誰かが上げ続けなければ古くなる。その担い手は Renovate で、
+設定はリポジトリ直下の `renovate.json` にある（ADR 0027）。`config:recommended`
+を土台にし、既定で効くものは書かず、足りない分だけを足してある。
+
+追う対象は次のとおり。
+
+| 対象 | どこ | 何が届くか |
+|---|---|---|
+| Go の依存 | `go.mod` の直接依存 | 依存ごとの PR |
+| Go のツール | `go.mod` の tool ディレクティブ | controller-gen / setup-envtest / golangci-lint / kind の PR |
+| Kubernetes 一式 | 上記のうち `k8s.io/*` と `sigs.k8s.io/controller-*` | まとめて1つの PR |
+| GitHub Actions | `.github/workflows/` | まとめて1つの PR |
+| ベースイメージ | `Dockerfile`、`hack/e2e/*/Dockerfile` | タグの版が上がったときの PR |
+| ACME のテストイメージ | `hack/e2e/pebble/`、`hack/e2e/challtestsrv/` | ダイジェストの PR |
+| manifest のイメージ | `config/manager/`、`hack/e2e/manifests/` | 外部のイメージが入ったときだけ |
+
+`k8s.io/api` / `k8s.io/apimachinery` / `k8s.io/client-go` /
+`k8s.io/apiextensions-apiserver` と `sigs.k8s.io/controller-runtime` /
+`sigs.k8s.io/controller-tools` / setup-envtest は、互いのバージョンが噛み合って
+いる。1つだけ上がった木はコンパイルが通らないので、1つの PR にまとめてある。
+その PR が落ちたときは、まとめている分すべてが止まる。
+
+`.github/workflows/` の action は commit SHA で固定してある（ADR 0026）。
+Renovate は SHA と併記のバージョンコメントの両方を書き換えるので、固定した
+ままで追随する。
+
+追わないものもある。
+
+- Makefile の `ENVTEST_K8S_VERSION` はレンジ指定で、固定値にしない
+- kind のノードイメージはどこにも書かれていない。kind の版が決めるので、
+  固定点は tool ディレクティブの kind である
+- `go.mod` の `go` ディレクティブは手で上げる
+- indirect な依存は上げない。直接依存が動けば追随する
+- `golang` と `gcr.io/distroless/static` はダイジェストまで固定しない。
+  前者はタグの版が上がれば PR になる
+- `config/manager/` と `hack/e2e/manifests/` が名前を挙げているイメージは、
+  gated 自身とこのリポジトリが組み立てる E2E 用のもので、上げる先がない
+
+設定を変えたときは、構文を Renovate 自身の validator で確認できる。
+
+```
+npx --yes --package renovate renovate-config-validator
+```
+
 ## 証明書
 
 Ingress の `spec.tls` がそのまま発行の指示になる。`kubernetes.io/tls-acme` の

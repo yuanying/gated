@@ -1,0 +1,54 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommitTypeAll(chore)"
+  ],
+  "timezone": "Asia/Tokyo",
+  "dependencyDashboard": true,
+  "kubernetes": {
+    "description": "The kubernetes manager matches no files until it is told which ones, and this repository keeps its manifests in two places",
+    "managerFilePatterns": [
+      "config/manager/*.yaml",
+      "hack/e2e/manifests/*.yaml"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Kubernetes libraries and the tools generating against them move as one release train: k8s.io/* is a set of staging repos cut from one tag, and controller-runtime, controller-tools and setup-envtest each track a specific one of those tags. Raising one without the others gives a tree that does not build. config:recommended already groups the k8s.io staging repos as `kubernetes monorepo`; joining the same group is what puts everything on one branch. The k8s.io/* members are named here as well rather than left to the preset, so that a rename upstream shows up as a group that does not exist instead of as a silent split",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": [
+        "k8s.io/api",
+        "k8s.io/apiextensions-apiserver",
+        "k8s.io/apimachinery",
+        "k8s.io/client-go",
+        "k8s.io/code-generator",
+        "sigs.k8s.io/controller-runtime",
+        "sigs.k8s.io/controller-runtime/**",
+        "sigs.k8s.io/controller-tools",
+        "sigs.k8s.io/controller-tools/**"
+      ],
+      "groupName": "kubernetes monorepo"
+    },
+    {
+      "description": "The images in the manifests are gated itself and the test scaffolding built from hack/, all of them tagged by the build that made them. There is no registry to ask about a newer one, so looking is only a failed lookup",
+      "matchManagers": ["kubernetes"],
+      "matchPackageNames": [
+        "ghcr.io/yuanying/gated",
+        "gated-*"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "The ACME test server and its DNS server are pulled by a tag that keeps moving, so a checkout does not say which image an end-to-end run used. Pinning the digest makes the Dockerfile the one place the version is stated, which is what the file was there for, and leaves Renovate to move it",
+      "matchManagers": ["dockerfile"],
+      "matchPackageNames": ["ghcr.io/letsencrypt/**"],
+      "pinDigests": true
+    },
+    {
+      "description": "Workflows are already read by the github-actions manager. Grouping them keeps a handful of actions from arriving as a handful of pull requests, since they are updated together and reviewed the same way",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    }
+  ]
+}
