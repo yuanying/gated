@@ -1,7 +1,7 @@
 # Build artifacts
 /bin/
 /dist/
-gated
+/gated
 
 # Test artifacts
 *.test
