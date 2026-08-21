@@ -8,8 +8,10 @@ import (
 
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -65,6 +67,11 @@ func (r *RoutingReconciler) Reconcile(ctx context.Context, _ reconcile.Request) 
 // SetupWithManager registers the controller. It runs on every replica, not
 // only the leader: each one serves traffic and so each one needs the table
 // (ADR 0006).
+//
+// Saying so is not optional. A controller that expresses no opinion is leader
+// elected, which is controller-runtime's default, and a replica that never
+// wins the lease would then never build a table and answer 404 to everything
+// it is handed.
 func (r *RoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	rebuild := handler.EnqueueRequestsFromMapFunc(
 		func(context.Context, client.Object) []reconcile.Request {
@@ -75,5 +82,6 @@ func (r *RoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("routing").
 		Watches(&networkingv1.Ingress{}, rebuild).
 		Watches(&networkingv1.IngressClass{}, rebuild).
+		WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)}).
 		Complete(r)
 }

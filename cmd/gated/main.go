@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	gatedacme "github.com/yuanying/gated/internal/acme"
@@ -232,17 +231,34 @@ func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.St
 	return nil
 }
 
-// warmUpCache starts the informers for a set of kinds before anything asks
+// cacheWarmUp starts the informers for a set of kinds before anything asks
 // them for an object.
-func warmUpCache(mgr ctrl.Manager, objs ...client.Object) manager.Runnable {
-	return manager.RunnableFunc(func(ctx context.Context) error {
-		for _, obj := range objs {
-			if _, err := mgr.GetCache().GetInformer(ctx, obj); err != nil {
-				return err
-			}
+//
+// It is not leader elected. The kinds it starts are read while a request is
+// being served, so a replica that never wins the lease needs them just as
+// much as the one that does (ADR 0006).
+type cacheWarmUp struct {
+	cache cache.Cache
+	objs  []client.Object
+}
+
+// warmUpCache returns a runnable that starts the informers for objs.
+func warmUpCache(mgr ctrl.Manager, objs ...client.Object) *cacheWarmUp {
+	return &cacheWarmUp{cache: mgr.GetCache(), objs: objs}
+}
+
+// NeedLeaderElection reports that every replica warms its own cache.
+func (w *cacheWarmUp) NeedLeaderElection() bool { return false }
+
+// Start requests each informer and returns; the cache itself keeps them
+// running for as long as the manager does.
+func (w *cacheWarmUp) Start(ctx context.Context) error {
+	for _, obj := range w.objs {
+		if _, err := w.cache.GetInformer(ctx, obj); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // managerOptions translates the startup configuration into the manager's own
