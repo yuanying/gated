@@ -110,7 +110,10 @@ func run(args []string) error {
 	}
 
 	// The remaining reconcilers — authorisation, tokens — are registered
-	// here as later stages add them.
+	// here as later stages add them, through a setup function of their
+	// own rather than inline: which side of ADR 0006's split a runnable
+	// falls on is checked per setup function, and one registered here
+	// directly is checked by nothing.
 
 	log.Info("starting",
 		"ingressClass", cfg.IngressClass,
