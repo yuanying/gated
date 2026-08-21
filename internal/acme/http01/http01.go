@@ -46,9 +46,7 @@ type Store interface {
 	Delete(ctx context.Context, token string) error
 }
 
-// Defaults for the two timings that matter. Propagation is deliberately
-// longer than the responder's TTL: a replica that took a snapshot just before
-// the write has to have refreshed before the CA arrives.
+// Defaults for the timings that matter.
 const (
 	// DefaultTTL is how long a replica reuses a snapshot of the
 	// outstanding challenges.
@@ -59,9 +57,11 @@ const (
 	// while still letting a token that arrived a moment ago be found.
 	DefaultMissTTL = time.Second
 	// DefaultPropagation is how long Present waits after the write is
-	// readable, so that replicas serving from a snapshot have had a chance
-	// to refresh.
-	DefaultPropagation = 2 * DefaultTTL
+	// readable. It is measured against MissTTL rather than TTL: a replica
+	// asked for a token its snapshot does not have takes a fresh look, so
+	// what has to elapse is only long enough for that snapshot to be older
+	// than MissTTL.
+	DefaultPropagation = 2 * DefaultMissTTL
 	// DefaultPollInterval and DefaultTimeout bound the wait for the write
 	// to become readable at all.
 	DefaultPollInterval = 200 * time.Millisecond
@@ -76,9 +76,9 @@ type Solver struct {
 	// readable, before reporting the challenge ready.
 	//
 	// Zero means no wait, which is only right when there is exactly one
-	// replica. With more than one it has to be at least the Responder's
-	// TTL, or a replica still serving an older snapshot answers a 404 to
-	// the validation request.
+	// replica. With more than one it has to exceed the Responder's
+	// MissTTL, or a replica whose snapshot is too fresh to be refreshed
+	// answers a 404 to the validation request.
 	Propagation time.Duration
 	// PollInterval and Timeout bound the wait for the write to be readable.
 	PollInterval time.Duration

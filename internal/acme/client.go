@@ -104,7 +104,11 @@ func (c *Client) Obtain(ctx context.Context, hosts []string) (*Keypair, error) {
 		}
 	}
 
-	order, err = client.WaitOrder(ctx, order.URI)
+	// The order URL is kept from here on. A directory is not obliged to
+	// repeat it in a Location header on later responses, and Pebble does
+	// not, so the value the order came back with is the only one there is.
+	orderURL := order.URI
+	order, err = client.WaitOrder(ctx, orderURL)
 	if err != nil {
 		return nil, fmt.Errorf("waiting for the order to be ready: %w", err)
 	}
@@ -117,9 +121,9 @@ func (c *Client) Obtain(ctx context.Context, hosts []string) (*Keypair, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building the certificate request: %w", err)
 	}
-	der, _, err := client.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
+	der, err := finalize(ctx, client, orderURL, order.FinalizeURL, csr)
 	if err != nil {
-		return nil, fmt.Errorf("finalizing the order: %w", err)
+		return nil, err
 	}
 
 	keypair, err := encodeKeypair(der, key)
@@ -128,6 +132,32 @@ func (c *Client) Obtain(ctx context.Context, hosts []string) (*Keypair, error) {
 	}
 	c.Log.Info("obtained a certificate", "hosts", wanted)
 	return keypair, nil
+}
+
+// finalize submits the request and collects the issued chain.
+//
+// The straightforward call does both, but it polls the order at the URL the
+// finalize response hands back in a Location header, and a directory is not
+// obliged to send one. Pebble does not, which leaves that call posting to an
+// empty URL. The order URL is known here — this process opened the order — so
+// on that failure the order is polled directly and the certificate collected
+// from it. An order that is genuinely unfinished comes back without a
+// certificate, and the original failure is what is reported.
+func finalize(ctx context.Context, client *xacme.Client, orderURL, finalizeURL string, csr []byte) ([][]byte, error) {
+	der, _, err := client.CreateOrderCert(ctx, finalizeURL, csr, true)
+	if err == nil {
+		return der, nil
+	}
+
+	issued, waitErr := client.WaitOrder(ctx, orderURL)
+	if waitErr != nil || issued.CertURL == "" {
+		return nil, fmt.Errorf("finalizing the order: %w", err)
+	}
+	der, fetchErr := client.FetchCert(ctx, issued.CertURL, true)
+	if fetchErr != nil {
+		return nil, fmt.Errorf("collecting the issued certificate: %w", fetchErr)
+	}
+	return der, nil
 }
 
 // authorize takes one authorization from pending to valid, recording in
