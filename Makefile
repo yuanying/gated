@@ -47,10 +47,17 @@ vet: fmt-check ## Run go vet over every package, including the tagged test packa
 	$(GO) vet -tags envtest ./...
 	$(GO) vet -tags integration ./...
 	$(GO) vet -tags e2e ./...
+	$(GO) vet -tags live ./...
 
+# One pass per build tag that cannot be combined. The end-to-end suite and the
+# live layer share a package, and the live layer replaces the parts of the
+# suite that differ (ADR 0025), so setting both tags at once declares the same
+# names twice.
 .PHONY: lint
 lint: ## Run golangci-lint over every package, including the tagged test packages.
 	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run --build-tags e2e ./...
+	$(GOLANGCI_LINT) run --build-tags live ./test/e2e/...
 
 .PHONY: lint-fix
 lint-fix: ## Run golangci-lint and apply the fixes it can make itself.
@@ -92,6 +99,14 @@ test-integration: ## Run the tests that need Pebble and a fake identity provider
 .PHONY: test-e2e
 test-e2e: ## Run the end-to-end tests against a kind cluster.
 	$(GO) test -tags e2e -count=1 -timeout 30m ./test/e2e/...
+
+# Opt-in, and part of no other target: this contacts a real certificate
+# authority and edits a real DNS zone (ADR 0025). What it needs comes from the
+# environment and has no defaults; without it the run says what is missing and
+# skips.
+.PHONY: verify-live
+verify-live: ## Order a certificate from a real ACME directory. Never run by CI.
+	$(GO) test -tags live -count=1 -timeout 30m -v ./test/e2e/...
 
 ##@ Housekeeping
 

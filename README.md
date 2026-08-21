@@ -132,6 +132,7 @@ make test             # 純関数ユニットテスト。外部依存なし
 make test-envtest     # 本物の apiserver と etcd に対する CRD の検証
 make test-integration # Pebble とフェイク IdP に対する検証。前者には docker が要る
 make test-e2e         # kind クラスターを立てての通し確認。docker が要る
+make verify-live      # 本物の ACME ディレクトリに対する検証。明示的に呼んだときだけ
 make generate         # CRD YAML・DeepCopy・RBAC の再生成
 make build            # bin/gated
 make vet              # go vet と gofmt の検査
@@ -150,6 +151,29 @@ kind クラスターを作り、`config/` の manifest と E2E 用の overlay �
 Pebble とモック IdP をクラスター内に置いて、ゴールの4項目に対応するシナリオを
 回す（ADR 0024）。数分かかるので日常の開発ループには乗せない。失敗を追いたい
 ときは `GATED_E2E_KEEP_CLUSTER=1` を付けるとクラスターが残る。
+
+`make verify-live` だけが本物の外部サービスに触れる。それ以外の層はどれも
+外に出ない（ADR 0007）。`go test ./...` にも `make test-e2e` にも混ざらず、
+CI では走らない（ADR 0025）。E2E と同じハーネスを使い、違うのは3点だけで、
+ACME ディレクトリが実在すること、ホスト名が実際に解決すること、検証が届く先が
+公開ポートではなくノード自身のアドレスであることである。
+
+必要な値はすべて環境変数から取る。既定値は持たないので、未設定なら理由を述べて
+skip する。
+
+| 環境変数 | 何を渡すか |
+|---|---|
+| `GATED_LIVE_ZONE` | 検証用のホスト名を作るゾーン |
+| `CLOUDFLARE_API_TOKEN` | そのゾーンのレコードを編集できるトークン |
+| `GATED_LIVE_IPV6_NETWORK` | インターネットから到達可能な IPv6 を持つ docker network |
+| `GATED_LIVE_ACME_EMAIL` | ACME アカウントの連絡先 |
+| `GATED_LIVE_ACME_DIRECTORY` | 省略可。既定は Let's Encrypt の staging |
+| `GATED_LIVE_ACME_ALLOW_NONSTAGING` | staging 以外を使うときに併せて必要 |
+| `GATED_LIVE_KEEP_RECORDS` | 省略可。後始末で DNS レコードを消さない |
+
+ホスト名は実行ごとに変わり、決まった接頭辞で始まる。作ったレコードは成功・失敗の
+どちらでも消す。異常終了で消し残した場合は、次の実行が開始時に同じ接頭辞の
+レコードを掃除する。
 
 golangci-lint は kind / controller-gen / setup-envtest と同じく `go.mod` の tool
 ディレクティブで固定してあるので、別途インストールは要らない（ADR 0011）。

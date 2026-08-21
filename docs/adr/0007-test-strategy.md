@@ -67,3 +67,4 @@ envtest と kind の実行にはバイナリのダウンロードと相応の実
 - [[0002-authorization-model]] — 純関数として切り出す判定の内容
 - [[0005-certificate-issuance]] — Pebble で検証する ACME の挙動
 - [[0008-migration-from-ingress-nginx]] — 本物の外部サービスに対する検証の位置づけ
+- [[0025-live-verification-against-a-real-authority]] — 本物の認証局に対する検証を、自動テストの外側の層として実行可能にしたもの。ここでの決定を覆すものではない

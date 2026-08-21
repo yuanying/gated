@@ -1,0 +1,12 @@
+# The cluster the live verification creates and destroys (ADR 0025).
+#
+# Nothing is published here. The end-to-end suite maps ports onto the loopback
+# address because everything that talks to it is local; this layer is reached
+# by a certificate authority on the internet, which arrives at the node's own
+# address on a network that carries globally routable addresses. gated runs on
+# the node's network namespace and answers there directly, so there is no port
+# to forward and no cluster IP for a manifest to name.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

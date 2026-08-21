@@ -14,11 +14,14 @@ version: "2"
 run:
   # The heavier test layers sit behind build tags (ADR 0007, 0011). Without
   # these they would not be compiled, and so not linted at all.
+  #
+  # `e2e` and `live` are not here. They share a package, and the live layer
+  # replaces the parts of the end-to-end suite that differ (ADR 0025), so
+  # setting both at once declares the same names twice. `make lint` adds one
+  # and then the other, in passes of their own.
   build-tags:
     - envtest
     - integration
-    - e2e
-    - live
 
 linters:
   default: none
