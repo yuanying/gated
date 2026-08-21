@@ -40,7 +40,7 @@ build: ## Build the gated binary into bin/.
 	$(GO) build -o bin/gated ./cmd/gated
 
 .PHONY: vet
-vet: ## Run go vet over every package, including the tagged test packages.
+vet: fmt-check ## Run go vet over every package, including the tagged test packages.
 	$(GO) vet ./...
 	$(GO) vet -tags envtest ./...
 	$(GO) vet -tags integration ./...
@@ -49,6 +49,15 @@ vet: ## Run go vet over every package, including the tagged test packages.
 .PHONY: fmt
 fmt: ## Format the source tree.
 	$(GO) fmt ./...
+
+.PHONY: fmt-check
+fmt-check: ## Fail if anything in the tree is not gofmt'd.
+	@unformatted="$$(gofmt -l . | grep -v '^bin/' || true)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "not gofmt'd, run \`make fmt\`:"; \
+		echo "$$unformatted" | sed 's/^/  /'; \
+		exit 1; \
+	fi
 
 ##@ Test
 

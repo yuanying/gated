@@ -3,10 +3,10 @@ package v1alpha1
 // The subject vocabulary of ADR 0002. Identifiers are the human-readable name
 // at the provider, not a numeric ID, so that a binding says who it grants to.
 //
-//   github:<login>          a single GitHub account
-//   google:<mail address>   a single Google account
-//   system:authenticated    anyone who has logged in
-//   system:unauthenticated  anyone at all, logged in or not
+//	github:<login>          a single GitHub account
+//	google:<mail address>   a single Google account
+//	system:authenticated    anyone who has logged in
+//	system:unauthenticated  anyone at all, logged in or not
 //
 // The patterns below are enforced by the API server, so a typo that would
 // silently grant nothing is rejected at admission instead.
