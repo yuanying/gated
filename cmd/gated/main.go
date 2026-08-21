@@ -30,6 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	gatedacme "github.com/yuanying/gated/internal/acme"
+	"github.com/yuanying/gated/internal/acme/http01"
 	gatev1alpha1 "github.com/yuanying/gated/internal/apis/gate/v1alpha1"
 	"github.com/yuanying/gated/internal/config"
 	"github.com/yuanying/gated/internal/controller"
@@ -97,12 +99,19 @@ func run(args []string) error {
 		return fmt.Errorf("registering the readiness check: %w", err)
 	}
 
-	if err := setupDataPlane(mgr, cfg, log); err != nil {
+	challenges := &http01.SecretStore{
+		Client:    mgr.GetClient(),
+		Namespace: cfg.ChallengeSecretNamespace,
+	}
+	if err := setupDataPlane(mgr, cfg, challenges, log); err != nil {
+		return err
+	}
+	if err := setupCertificates(mgr, cfg, challenges, log); err != nil {
 		return err
 	}
 
-	// The remaining reconcilers — certificates, authorisation, tokens — are
-	// registered here as later stages add them.
+	// The remaining reconcilers — authorisation, tokens — are registered
+	// here as later stages add them.
 
 	log.Info("starting",
 		"ingressClass", cfg.IngressClass,
@@ -129,7 +138,7 @@ func run(args []string) error {
 // Everything here runs on every replica. Only certificate issuance is the
 // leader's job (ADR 0006), so nothing in this path may be gated on the lease:
 // a replica that loses it must keep serving traffic.
-func setupDataPlane(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error {
+func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Source, log logr.Logger) error {
 	tables := &proxy.TableStore{}
 
 	routes := &controller.RoutingReconciler{
@@ -162,15 +171,63 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error 
 			Backends: &controller.ServiceResolver{Reader: mgr.GetCache()},
 			Log:      log.WithName("proxy"),
 		},
-		// Certificate issuance arrives in a later stage; until then the
-		// plain listener answers no ACME challenge and forwards nothing.
-		InsecureHandler: &proxy.InsecureHandler{Log: log.WithName("http")},
+		// Answering challenges is every replica's job, not the
+		// leader's: the CA reaches whichever replica the load balancer
+		// hands it (ADR 0006).
+		InsecureHandler: &proxy.InsecureHandler{
+			Solver: &http01.Responder{Source: challenges, Log: log.WithName("acme-http01")},
+			Log:    log.WithName("http"),
+		},
 		TLSConfig:       certificates.TLSConfig(),
 		ShutdownTimeout: proxyDrainTimeout,
 		Log:             log.WithName("servers"),
 	}
 	if err := mgr.Add(servers); err != nil {
 		return fmt.Errorf("registering the listeners: %w", err)
+	}
+	return nil
+}
+
+// setupCertificates wires the ACME client and the reconciler that drives it.
+//
+// The reconciler is leader elected, which is controller-runtime's default and
+// what ADR 0006 asks for: every replica watches and proxies, but only one
+// places orders, or the same certificate is ordered once per replica and the
+// directory's rate limit is spent that much faster.
+func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.Store, log logr.Logger) error {
+	acmeLog := log.WithName("acme")
+
+	issuer := &gatedacme.Client{
+		DirectoryURL: cfg.ACME.DirectoryURL,
+		Email:        cfg.ACME.Email,
+		Accounts: &gatedacme.SecretAccountStore{
+			Client:    mgr.GetClient(),
+			Namespace: cfg.ACME.AccountSecret.Namespace,
+			Name:      cfg.ACME.AccountSecret.Name,
+			Log:       acmeLog,
+		},
+		Solver: &http01.Solver{
+			Store: challenges,
+			// The write has to be old enough that a replica
+			// serving a snapshot takes a fresh look before it
+			// answers the validation request.
+			Propagation: http01.DefaultPropagation,
+			Log:         acmeLog.WithName("http01"),
+		},
+		UserAgent: "gated",
+		Log:       acmeLog,
+	}
+
+	certificates := &controller.CertificateReconciler{
+		Client:       mgr.GetClient(),
+		Reader:       mgr.GetCache(),
+		IngressClass: cfg.IngressClass,
+		Issuer:       issuer,
+		Recorder:     mgr.GetEventRecorderFor("gated-certificates"),
+		Log:          log.WithName("certificates"),
+	}
+	if err := certificates.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the certificate controller: %w", err)
 	}
 	return nil
 }
