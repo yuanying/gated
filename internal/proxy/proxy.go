@@ -88,6 +88,13 @@ var (
 	targetContextKey = &contextKey{"backend-target"}
 )
 
+// RequestWithMatch records the route a request was matched to, so that the
+// middleware after routing — authorisation, and the login flow beside it — can
+// read it without matching a second time.
+func RequestWithMatch(r *http.Request, match routing.Match) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), matchContextKey, match))
+}
+
 // MatchFromContext returns the route a request was matched to, if it has been
 // routed yet.
 func MatchFromContext(ctx context.Context) (routing.Match, bool) {
@@ -105,7 +112,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.init()
-	h.chain.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), matchContextKey, match)))
+	h.chain.ServeHTTP(w, RequestWithMatch(r, match))
 }
 
 // init builds the handler chain and the reverse proxy once, so that the
