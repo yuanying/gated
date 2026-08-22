@@ -336,7 +336,10 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		// hands it (ADR 0006).
 		InsecureHandler: &proxy.InsecureHandler{
 			Solver: &http01.Responder{Source: challenges, Log: log.WithName("acme-http01")},
-			Log:    log.WithName("http"),
+			// A name nothing routes is answered 404 here rather than
+			// sent to HTTPS to be answered 404 there (ADR 0030).
+			Hosts: tables,
+			Log:   log.WithName("http"),
 		},
 		TLSConfig:       certificates.TLSConfig(),
 		ShutdownTimeout: proxyDrainTimeout,
