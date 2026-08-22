@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -74,6 +75,15 @@ type Handler struct {
 	// Transport is used for the outbound request. A nil Transport uses
 	// http.DefaultTransport.
 	Transport http.RoundTripper
+	// BodyReadTimeout bounds one read of the client's request body, and
+	// is renewed before each read: it is the gap between two reads that is
+	// bounded, not the transfer. Zero uses the value in ADR 0030.
+	BodyReadTimeout time.Duration
+	// ResponseWriteTimeout bounds one write to the client, and is renewed
+	// before each write: it is a client that stops reading that it ends,
+	// not a response that is slow to produce. Zero uses the value in
+	// ADR 0030.
+	ResponseWriteTimeout time.Duration
 	// Middleware wraps the forwarding step. The route has already been
 	// resolved by the time it runs, so authentication and authorisation can
 	// read it from the request context. A nil Middleware forwards directly.
@@ -141,7 +151,7 @@ func (h *Handler) init() {
 			Transport:    h.Transport,
 			ErrorHandler: h.handleUpstreamError,
 		}
-		forward := http.HandlerFunc(h.forward)
+		forward := h.guardDeadlines(http.HandlerFunc(h.forward))
 		if h.Middleware != nil {
 			h.chain = h.Middleware(forward)
 			return
@@ -175,6 +185,15 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request) {
 // handleUpstreamError turns a failed outbound request into a 502. A client
 // that went away is not an upstream failure and gets no response at all.
 func (h *Handler) handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
+	// A body that stopped arriving takes its connection down with it, and
+	// the forwarded request then fails as a cancellation. Without saying so
+	// here, the client would be answered 200 for a request whose body never
+	// reached the backend.
+	if state, ok := transferFromContext(r.Context()); ok && state.bodyTimedOut.Load() {
+		h.Log.V(1).Info("the client stopped sending its request body", "host", r.Host)
+		http.Error(w, "the request body stopped arriving", http.StatusRequestTimeout)
+		return
+	}
 	if errors.Is(err, context.Canceled) {
 		return
 	}

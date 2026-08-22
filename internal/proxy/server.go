@@ -21,6 +21,12 @@ const defaultShutdownTimeout = 30 * time.Second
 // nothing, so that idle connections cannot be used to exhaust the listener.
 const defaultReadHeaderTimeout = 20 * time.Second
 
+// defaultIdleTimeout bounds how long a connection that has finished one
+// request may wait before starting another. Without it a client can hold a
+// connection, and the goroutine and file descriptor behind it, for as long as
+// it likes (ADR 0030).
+const defaultIdleTimeout = 90 * time.Second
+
 // Servers runs the two listeners as one unit.
 //
 // It satisfies controller-runtime's Runnable and does not need leader
@@ -46,6 +52,9 @@ type Servers struct {
 	// ReadHeaderTimeout bounds how long a client may take to send its
 	// request headers.
 	ReadHeaderTimeout time.Duration
+	// IdleTimeout bounds how long a kept-alive connection may sit between
+	// requests.
+	IdleTimeout time.Duration
 	// Log reports the lifecycle of the listeners. The zero Logger discards.
 	Log logr.Logger
 
@@ -142,13 +151,18 @@ func (s *Servers) Start(ctx context.Context) error {
 }
 
 func (s *Servers) newServer(h http.Handler) *http.Server {
-	timeout := s.ReadHeaderTimeout
-	if timeout <= 0 {
-		timeout = defaultReadHeaderTimeout
+	header := s.ReadHeaderTimeout
+	if header <= 0 {
+		header = defaultReadHeaderTimeout
+	}
+	idle := s.IdleTimeout
+	if idle <= 0 {
+		idle = defaultIdleTimeout
 	}
 	return &http.Server{
 		Handler:           h,
-		ReadHeaderTimeout: timeout,
+		ReadHeaderTimeout: header,
+		IdleTimeout:       idle,
 		ErrorLog:          nil,
 	}
 }
