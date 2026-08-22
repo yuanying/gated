@@ -18,8 +18,13 @@ spec:
         app.kubernetes.io/name: gated
     spec:
       serviceAccountName: gated
-      # The manager drains its listeners for 25 seconds and then has 30 to
-      # stop, so anything shorter than this kills a replica mid-drain.
+      # Five seconds of still answering while this replica leaves the
+      # endpoints, then 25 draining inside the 30 the manager allows itself
+      # to stop in. Anything shorter than the sum kills a replica mid-drain.
+      #
+      # The five seconds are --shutdown-delay rather than a preStop hook that
+      # sleeps: the image is a single executable with no shell in it
+      # (ADR 0023).
       terminationGracePeriodSeconds: 40
       securityContext:
         runAsNonRoot: true

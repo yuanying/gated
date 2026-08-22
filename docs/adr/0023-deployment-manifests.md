@@ -1,6 +1,7 @@
 # 0023. gated 自身を動かす manifest を置き、環境固有の値はその外に出す
 
 - Date: 2026-08-21
+- Updated: 2026-08-22（入れ替え時の 502 を減らす待ち時間を、`preStop` ではなくフラグにした理由を足した）
 - Status: Accepted
 
 ## Context
@@ -37,6 +38,16 @@ marker は reconciler ごとに散らすのではなく1ファイルにまとめ
 
 LoadBalancer なのか NodePort なのかホストポートなのかは、gated の性質ではなくクラスターの性質である。基準の manifest は ClusterIP だけを定義し、外部からの到達方法は overlay に委ねる。
 
+### 入れ替えの待ち時間は `preStop` ではなくフラグで持つ
+
+Pod を endpoints から外すことと、その Pod に SIGTERM を送ることは、Kubernetes では別々に進む。順序の保証は無いので、まだトラフィックを送っているノードがある間に gated がリスナーを閉じることがある。入れ替えのたびに数百 ms ぶんの 502 が出るのはこれである。
+
+一般的な対処は `preStop` で数秒眠らせることだが、gated のイメージは実行ファイル1つで、シェルも `sleep` も無い（ADR 0029 の distroless）。`preStop` の sleep を入れるためだけにシェルのある土台へ移す——攻撃面を広げる——のは、待ち時間の代償として高い。Kubernetes 自身が持つ sleep アクションは、対象のクラスターでまだ使えるとは限らない。
+
+そこで待ち時間は gated 自身が持つ。SIGTERM を受けてから既定で5秒、リスナーをそのままにして応答を続け、それから drain に入る。どこで動かしても同じ意味の値なので既定値を持ってよい（ADR 0009）。2回目のシグナルは従来どおり即座に中断させるので、止まらない shutdown を切る手段は残る。
+
+`terminationGracePeriodSeconds` はこの待ち時間を含む長さでなければならない。基準の manifest は、5秒の待ちと 25 秒の drain、それを包む 30 秒の停止猶予が収まる 40 秒を書いている。
+
 ## Consequences
 
 `kubectl apply -k config/default` だけでは動かない。README がその一段を説明する必要があり、実際に説明している。代わりに、リポジトリの中に運用中のドメイン名やメールアドレスが入り込む経路が無い。
@@ -53,3 +64,4 @@ LoadBalancer なのか NodePort なのかホストポートなのかは、gated 
 - [[0011-generated-artifacts-and-tooling]] — 生成物と道具の固定の仕方
 - [[0006-high-availability]] — Lease の権限が要る理由
 - [[0024-end-to-end-harness]] — この manifest を実際に使う層
+- [[0029-publishing-the-container-image]] — シェルを持たないイメージ

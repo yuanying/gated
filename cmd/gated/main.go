@@ -144,12 +144,43 @@ func run(args []string) error {
 	// SetupSignalHandler cancels the context on the first SIGINT or SIGTERM
 	// and aborts the process on the second, so a stuck shutdown can still be
 	// interrupted. Start returns once every runnable has stopped.
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(afterShutdownDelay(ctrl.SetupSignalHandler(), cfg.ShutdownDelay, log)); err != nil {
 		return fmt.Errorf("running the manager: %w", err)
 	}
 
 	log.Info("stopped")
 	return nil
+}
+
+// afterShutdownDelay returns a context that is cancelled the delay after
+// parent is, so that gated goes on serving for a moment after it is asked to
+// stop.
+//
+// Removing a Pod from a Service's endpoints and sending it SIGTERM are
+// independent: the signal can arrive before every kube-proxy has stopped
+// sending traffic here, and a replica that closes its listeners at once
+// refuses whatever was routed to it in between. A Deployment usually buys that
+// moment with a preStop hook that sleeps, but the image carries a single
+// executable and no shell (see the Dockerfile), so the wait is gated's own.
+//
+// The second signal is unaffected: it aborts the process through the handler
+// this wraps, so a shutdown that will not finish can still be cut short.
+func afterShutdownDelay(parent context.Context, delay time.Duration, log logr.Logger) context.Context {
+	if delay <= 0 {
+		return parent
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-parent.Done()
+		log.Info("asked to stop; still answering while this replica leaves the endpoints", "delay", delay)
+
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		<-timer.C
+		cancel()
+	}()
+	return ctx
 }
 
 // setupDataPlane wires the routing table, the reverse proxy and the two
