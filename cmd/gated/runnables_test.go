@@ -140,6 +140,14 @@ func leaderOnlySetups() map[string]setup {
 		"setupAccessTokens": func(mgr ctrl.Manager) error {
 			return setupAccessTokens(mgr, logr.Discard())
 		},
+		"setupIngressStatus": func(mgr ctrl.Manager) error {
+			cfg := testConfig()
+			// Without something to publish there is nothing to
+			// register, and the check below would have nothing to
+			// look at.
+			cfg.Publish.Services = config.ServiceRefs{{Namespace: "gated-system", Name: "gated-v4"}}
+			return setupIngressStatus(mgr, cfg, logr.Discard())
+		},
 	}
 }
 

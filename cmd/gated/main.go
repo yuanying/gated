@@ -21,6 +21,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -120,6 +121,9 @@ func run(args []string) error {
 		return err
 	}
 	if err := setupAuthorizationStatus(mgr, observed, log); err != nil {
+		return err
+	}
+	if err := setupIngressStatus(mgr, cfg, log); err != nil {
 		return err
 	}
 	if err := setupSessionKey(mgr, cfg, log); err != nil {
@@ -369,6 +373,40 @@ func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.St
 	}
 	if err := certificates.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("registering the certificate controller: %w", err)
+	}
+	return nil
+}
+
+// setupIngressStatus wires the reconciler that writes the address gated is
+// reachable at into the Ingresses it is responsible for.
+//
+// It is leader elected. Every replica would write the same value, so letting
+// them all write it multiplies the updates by the number of replicas and tells
+// whoever reads the Ingress nothing more (ADR 0006, ADR 0032).
+//
+// Nothing is registered at all when no address was named. That is a deployment
+// saying it does not want its Ingress status touched, and the way to honour it
+// is to have nothing watching for a reason to touch it.
+func setupIngressStatus(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error {
+	if cfg.Publish.IsZero() {
+		return nil
+	}
+
+	services := make([]types.NamespacedName, 0, len(cfg.Publish.Services))
+	for _, ref := range cfg.Publish.Services {
+		services = append(services, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name})
+	}
+
+	status := &controller.IngressStatusReconciler{
+		Client:       mgr.GetClient(),
+		Reader:       mgr.GetCache(),
+		IngressClass: cfg.IngressClass,
+		Services:     services,
+		Addresses:    cfg.Publish.Addresses,
+		Log:          log.WithName("ingress-status"),
+	}
+	if err := status.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the Ingress status controller: %w", err)
 	}
 	return nil
 }
