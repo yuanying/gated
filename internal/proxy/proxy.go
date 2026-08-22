@@ -110,6 +110,16 @@ func MatchFromContext(ctx context.Context) (routing.Match, bool) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Before anything reads the path: a path that gated and the backend
+	// would resolve differently is refused rather than routed, because
+	// authorisation compares it as a string and would be reading the
+	// wrong one (ADR 0012).
+	if err := routing.CheckPath(r.URL.Path, r.URL.RawPath); err != nil {
+		h.Log.V(1).Info("refusing a path that is not in canonical form", "host", r.Host)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	match, ok := h.Tables.Load().Match(r.Host, r.URL.Path)
 	if !ok {
 		// Nothing claims this host and path, including before the first

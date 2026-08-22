@@ -366,3 +366,96 @@ func TestProxyExposesTheMatchedRoute(t *testing.T) {
 		t.Errorf("match.Ingress = %+v, want %+v", seen.Ingress, want)
 	}
 }
+
+// requestLine sends one request line to addr, with a Host header and nothing
+// else, and returns the response. Going through a raw connection is the only
+// way to put a path on the wire exactly as written: a client would be entitled
+// to tidy it up on the way out, and what is under test here is what gated does
+// with what it receives.
+func requestLine(t *testing.T, addr, target, host string) *http.Response {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("Dial() = %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	if _, err := io.WriteString(conn, "GET "+target+" HTTP/1.1\r\nHost: "+host+"\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("writing the request line: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse() = %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func TestProxyRefusesAPathThatIsNotCanonical(t *testing.T) {
+	// A path the backend would resolve somewhere else than gated matched
+	// it must not reach the backend at all: authorisation compares paths as
+	// strings, so it is the refusal that keeps the two readings from
+	// diverging (ADR 0012).
+	var reached bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		io.WriteString(w, "hello")
+	}))
+	defer backend.Close()
+
+	front := httptest.NewServer(&proxy.Handler{
+		Tables:   tableFor("app.example.com"),
+		Backends: toAddress(addressOf(t, backend)),
+	})
+	defer front.Close()
+
+	tests := []struct {
+		name   string
+		target string
+		want   int
+	}{
+		{"a dot-dot segment", "/allowed/../secret", http.StatusBadRequest},
+		{"a dot-dot segment, percent-encoded", "/allowed/%2e%2e/secret", http.StatusBadRequest},
+		{"a dot-dot segment carrying a path parameter", "/allowed/..;/secret", http.StatusBadRequest},
+		{"an encoded slash", "/allowed%2Fsecret", http.StatusBadRequest},
+		{"a plain path", "/allowed/secret", http.StatusOK},
+		{"an empty segment", "//allowed", http.StatusOK},
+		{"a path parameter", "/allowed;jsessionid=x", http.StatusOK},
+		{"a space, percent-encoded", "/allowed%20here", http.StatusOK},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reached = false
+			resp := requestLine(t, addressOf(t, front), tc.target, "app.example.com")
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+			if want := tc.want == http.StatusOK; reached != want {
+				t.Errorf("the backend was reached = %t, want %t", reached, want)
+			}
+		})
+	}
+}
+
+func TestProxyRefusesBeforeItRoutes(t *testing.T) {
+	// The refusal comes before the routing table is consulted, so a
+	// non-canonical path is a 400 even where a 404 would otherwise be the
+	// answer. Nothing downstream — the route, the authorisation decision —
+	// ever sees the path.
+	front := httptest.NewServer(&proxy.Handler{
+		Tables:   tableFor("app.example.com"),
+		Backends: toAddress("127.0.0.1:1"),
+		Middleware: func(http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("the middleware ran, want the request refused before it")
+			})
+		},
+	})
+	defer front.Close()
+
+	resp := requestLine(t, addressOf(t, front), "/a/../b", "nobody.example.org")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
