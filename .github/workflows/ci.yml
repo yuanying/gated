@@ -16,9 +16,12 @@ on:
     branches: [main]
   pull_request:
 
-# Nothing here writes to the repository, publishes a package or comments on a
-# pull request, so the read-only default is all any job gets. A workflow that
-# needs more has to ask for it in its own job, where it is visible in review.
+# This workflow decides whether a pull request is good, and deciding writes
+# nothing: no job here touches the repository, a package or a comment, so the
+# read-only default is all any of them gets. Work that does write lives in a
+# workflow of its own, where the permission it needs is on the job that needs
+# it (ADR 0029). Keeping the two apart is what makes this line readable as a
+# statement about the whole file.
 permissions:
   contents: read
 
@@ -52,12 +55,40 @@ jobs:
 
       # The live layer takes every value it needs from the environment and has
       # no defaults (ADR 0025), so a run that cannot see these skips instead of
-      # reaching anything real. Keeping them out of the workflows is also what
-      # lets pull requests from forks run the whole of CI.
-      - name: No workflow hands out credentials
+      # reaching anything real. This one has no exception: no workflow in this
+      # repository has a reason to name any of them.
+      - name: No workflow names a value the live layer reads
         run: |
-          if grep -rnE 'secrets[.]|GATED[_]LIVE|CLOUDFLARE[_]API[_]TOKEN' .github/workflows/; then
-            echo "::error::a workflow above reads a secret. CI is meant to run unchanged on pull requests from forks, where secrets are not available."
+          if grep -rnE 'GATED[_]LIVE|CLOUDFLARE[_]API[_]TOKEN' .github/workflows/; then
+            echo "::error::a workflow above names a value the live layer reads. ADR 0025 gives those values no defaults so that a run which cannot see them skips instead of reaching a real authority."
+            exit 1
+          fi
+
+      # What has to hold is that a pull request can be judged without a stored
+      # secret, which is what lets pull requests from forks run the whole of
+      # CI. The token GitHub mints for a run is not one: it lives for the job,
+      # the `permissions` block of that job is its ceiling, and it reaches
+      # nothing outside this repository. Publishing the image needs it and
+      # nothing else does (ADR 0029), so it is named here as the one exception
+      # rather than left to be worked around through the github context.
+      - name: No workflow reads a stored secret
+        run: |
+          if grep -rnE 'secrets[.]' .github/workflows/ | grep -vE 'secrets[.]GITHUB_TOKEN'; then
+            echo "::error::a workflow above reads a stored secret. A pull request has to be judged without one (ADR 0026); the token minted for the run is the only exception."
+            exit 1
+          fi
+
+      # Publishing is kept off pull requests by its trigger alone: a fork's
+      # pull request raises no push event here, so nothing a fork wrote is
+      # ever run by the job holding a token that can write packages. The
+      # trigger that would undo that checks out the fork's branch with this
+      # repository's token, and nothing here needs it (ADR 0029). Its name is
+      # written in the bracket form below for the same reason as the patterns
+      # above: the step is searched along with everything else.
+      - name: No workflow runs a fork's branch with this repository's rights
+        run: |
+          if grep -rnE 'pull[_]request_target' .github/workflows/; then
+            echo "::error::a workflow above triggers on the event that checks out a fork's branch with this repository's token. Publishing stays off pull requests entirely (ADR 0029)."
             exit 1
           fi
 

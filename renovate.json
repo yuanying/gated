@@ -31,7 +31,7 @@
       "groupName": "kubernetes monorepo"
     },
     {
-      "description": "The images in the manifests are gated itself and the test scaffolding built from hack/, all of them tagged by the build that made them. There is no registry to ask about a newer one, so looking is only a failed lookup",
+      "description": "The images in the manifests are gated itself and the test scaffolding built from hack/. The scaffolding is tagged by the build that made it and exists in no registry, so looking is only a failed lookup. gated is published, but the tag written here names the branch rather than a version (ADR 0029): it is what a checkout runs, and it moves on its own. Where a version has to be chosen, an overlay writes it, and the repository holding that overlay is where Renovate belongs",
       "matchManagers": ["kubernetes"],
       "matchPackageNames": [
         "ghcr.io/yuanying/gated",

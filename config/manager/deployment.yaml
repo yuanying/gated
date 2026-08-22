@@ -38,7 +38,7 @@ spec:
                     app.kubernetes.io/name: gated
       containers:
         - name: gated
-          image: ghcr.io/yuanying/gated:latest
+          image: ghcr.io/yuanying/gated:main
           args:
             # Only settings that mean the same thing in every cluster belong
             # here. The ones that name a deployment — the ACME directory and

@@ -1,0 +1,107 @@
+# Publishing the gated image
+#
+# A cluster pulls what this workflow pushes, so it is built from a commit that
+# is in this repository rather than from whatever a laptop happened to hold
+# (ADR 0029). One rule decides the tag: the image is named after the git ref
+# it was built from. A push to main publishes `main`, pushing a version tag
+# publishes that tag, and a deployment pins the version tag — `main` keeps
+# moving and is not something to pin. `latest` is not published at all.
+#
+# This is the one workflow here that writes something and the one that cannot
+# run for a pull request. Both are why it is a file of its own: in ci.yml the
+# read-only permission at the top says the whole file writes nothing, and that
+# sentence is worth keeping true.
+name: publish
+
+# Push events only. A pull request from a fork raises no push event in this
+# repository, so no branch a fork wrote ever reaches the job below, which
+# holds a token that can write packages. A push inside a fork runs in that
+# fork, against that fork's packages. The `no-live-layer` job in ci.yml keeps
+# the trigger that would change this out of every workflow.
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+# Two pushes to main can be in flight at once, and the later one should win
+# the `main` tag. Cancelling is per ref, so a version tag is never cancelled
+# by a push to main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Widened here and not at the top of the file, so that the one job able to
+    # write a package is the one that says so (ADR 0029).
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Buildx is what makes the platform a list rather than whatever the
+      # runner happens to be. Only linux/amd64 is built: every arm64 node gated
+      # is being deployed to is unschedulable, and emulating one costs build
+      # minutes nobody is waiting on. Adding a platform is adding an entry —
+      # the Dockerfile already takes its target from the builder.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # The token GitHub mints for this run. It is not a stored secret: it
+      # exists for the length of the job and the permissions above are its
+      # ceiling (ADR 0029). The same value is readable through the github
+      # context, which the check in ci.yml does not look at — reaching for it
+      # there would be a way around a check, so it is written as a secret and
+      # allowed by name.
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          # Left off, the push carries a provenance attestation, which turns a
+          # single-platform image into an index with an entry no runtime asks
+          # for. Whether to sign and attest is a decision this repository has
+          # not made; when it does, it goes in an ADR first.
+          provenance: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+
+      # What was pushed, what it hashes to and where to look at it, on the
+      # run's own page. Reading it should not mean opening a build log.
+      - name: Say what was published
+        env:
+          TAG: ${{ github.ref_name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "### ${IMAGE}:${TAG}"
+            echo
+            echo "- digest: \`${DIGEST}\`"
+            echo "- built from: ${SERVER}/${REPO}/commit/${SHA}"
+            echo "- package: ${SERVER}/users/${OWNER}/packages/container/package/gated"
+          } >> "$GITHUB_STEP_SUMMARY"
