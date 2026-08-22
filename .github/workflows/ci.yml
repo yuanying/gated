@@ -118,6 +118,31 @@ jobs:
             exit 1
           fi
 
+  # `go mod tidy` has to be a thing anyone can run. It stopped being one once
+  # the module graph carried two modules providing the same package, and
+  # nothing noticed because no job ran it: the break only showed up when
+  # somebody tried to add a dependency (ADR 0028).
+  tidy:
+    name: go.mod is tidy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Fails on its own if the graph is ambiguous again, before the diff below
+      # is even reached.
+      - run: make tidy
+      - name: go.mod and go.sum are unchanged
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git diff
+            echo "::error::tidying changed the working tree. Run \`make tidy\` and commit the result (ADR 0028)."
+            exit 1
+          fi
+
   envtest:
     name: envtest
     runs-on: ubuntu-latest
