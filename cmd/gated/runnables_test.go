@@ -13,6 +13,7 @@ import (
 
 	"github.com/yuanying/gated/internal/acme/http01"
 	"github.com/yuanying/gated/internal/config"
+	"github.com/yuanying/gated/internal/proxy"
 )
 
 // The tests in this file are about one line of ADR 0006: every replica
@@ -109,7 +110,11 @@ func dataPlaneSetups() map[string]setup {
 				Client:    mgr.GetClient(),
 				Namespace: cfg.ChallengeSecretNamespace,
 			}
-			return setupDataPlane(mgr, cfg, challenges, logr.Discard())
+			// No metrics: registering the same collectors
+			// with the process-wide registry twice would
+			// panic, and what is under test is which
+			// runnables were added.
+			return setupDataPlane(mgr, cfg, challenges, &proxy.AccessLog{}, logr.Discard())
 		},
 	}
 }

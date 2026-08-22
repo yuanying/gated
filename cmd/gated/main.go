@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/yuanying/gated/internal/accesstoken"
@@ -107,7 +108,7 @@ func run(args []string) error {
 		Client:    mgr.GetClient(),
 		Namespace: cfg.ChallengeSecretNamespace,
 	}
-	if err := setupDataPlane(mgr, cfg, challenges, log); err != nil {
+	if err := setupDataPlane(mgr, cfg, challenges, accessLog(cfg, log), log); err != nil {
 		return err
 	}
 	if err := setupCertificates(mgr, cfg, challenges, log); err != nil {
@@ -148,7 +149,7 @@ func run(args []string) error {
 // Everything here runs on every replica. Only certificate issuance is the
 // leader's job (ADR 0006), so nothing in this path may be gated on the lease:
 // a replica that loses it must keep serving traffic.
-func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Source, log logr.Logger) error {
+func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Source, records *proxy.AccessLog, log logr.Logger) error {
 	tables := &proxy.TableStore{}
 
 	routes := &controller.RoutingReconciler{
@@ -265,8 +266,14 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		// forwarded: the token is read first so that the decision has a
 		// subject to work from, and the decision itself is unchanged by
 		// where that subject came from (ADR 0018).
+		// Observe appears twice because the two things the access log
+		// wants are settled at different depths: the route is known as
+		// soon as the proxy has matched, and the principal only once
+		// the decision has named one. A request that is refused passes
+		// the first and not the second, and is still recorded against
+		// the Ingress it was aimed at (ADR 0031).
 		Middleware: func(next http.Handler) http.Handler {
-			return tokens.Wrap(decision.Wrap(next))
+			return proxy.Observe(tokens.Wrap(decision.Wrap(proxy.Observe(next))))
 		},
 		Log: log.WithName("proxy"),
 	}
@@ -276,13 +283,14 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		HTTPSAddr: cfg.HTTPSAddr,
 		// The login sits in front of everything else: the paths it
 		// claims are answered by gated itself and never routed,
-		// authorised or forwarded (ADR 0018).
-		Handler: &authn.Router{
+		// authorised or forwarded (ADR 0018). The access log is
+		// outside even that, so that the login flow is recorded too.
+		Handler: records.Wrap(&authn.Router{
 			AuthHost: cfg.Auth.Host,
 			Central:  central,
 			Callback: protected,
 			Next:     dataPlane,
-		},
+		}),
 		// Answering challenges is every replica's job, not the
 		// leader's: the CA reaches whichever replica the load balancer
 		// hands it (ADR 0006).
@@ -298,6 +306,21 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		return fmt.Errorf("registering the listeners: %w", err)
 	}
 	return nil
+}
+
+// accessLog builds the record kept of what passes through the edge.
+//
+// The counters are registered with the metrics registry the manager already
+// serves, so gated exposes one endpoint rather than two. Switching the log off
+// takes away the logger and leaves the counters, because a line saying who
+// asked for what and a series saying how much of it there was answer different
+// questions (ADR 0031).
+func accessLog(cfg config.Config, log logr.Logger) *proxy.AccessLog {
+	records := &proxy.AccessLog{Metrics: proxy.NewHTTPMetrics(metrics.Registry)}
+	if cfg.AccessLog {
+		records.Log = log.WithName("access")
+	}
+	return records
 }
 
 // setupCertificates wires the ACME client and the reconciler that drives it.
