@@ -192,6 +192,7 @@ GitHub Actions が、PR と `main` への push のたびに回る。ジョブは
 | lint | `make lint` |
 | unit | `make test` |
 | generate | `make generate` の後に差分が無いこと |
+| go.mod is tidy | `make tidy` が完走し、その後に差分が無いこと（ADR 0028） |
 | envtest | `make test-envtest` |
 | integration | `make test-integration` |
 | e2e | `make test-e2e` |
