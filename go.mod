@@ -3,7 +3,7 @@ module github.com/yuanying/gated
 go 1.27
 
 require (
-	github.com/go-logr/logr v1.4.3
+	github.com/go-logr/logr v1.4.4
 	golang.org/x/crypto v0.55.0
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
