@@ -53,6 +53,9 @@ type NetworkRoleReconciler struct {
 	Reader client.Reader
 	// Recorder reports a reference that resolves to nothing. Required.
 	Recorder record.EventRecorder
+	// Metrics receives whether the target resolved (ADR 0031). A nil
+	// Metrics reports nothing.
+	Metrics *Metrics
 	// Log records the decisions. The zero Logger discards.
 	Log logr.Logger
 }
@@ -62,6 +65,8 @@ func (r *NetworkRoleReconciler) Reconcile(ctx context.Context, req reconcile.Req
 	var role gatev1alpha1.NetworkRole
 	if err := r.Reader.Get(ctx, req.NamespacedName, &role); err != nil {
 		if apierrors.IsNotFound(err) {
+			// A role that no longer exists is not an unresolved one.
+			r.Metrics.ForgetNetworkRole(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -116,6 +121,11 @@ func (r *NetworkRoleReconciler) Reconcile(ctx context.Context, req reconcile.Req
 			condition.Message = fmt.Sprintf("Ingress %s serves %s", key, hostList(hosts))
 		}
 	}
+
+	// Reported before the comparison below, not after it: a restarted
+	// process finds the status already correct and writes nothing, and the
+	// series has to appear all the same.
+	r.Metrics.SetNetworkRoleResolved(role.Namespace, role.Name, condition.Status == metav1.ConditionTrue)
 
 	meta.SetStatusCondition(&status.Conditions, condition)
 	if apiequality.Semantic.DeepEqual(role.Status, status) {

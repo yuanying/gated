@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/yuanying/gated/internal/accesstoken"
@@ -108,13 +108,18 @@ func run(args []string) error {
 		Client:    mgr.GetClient(),
 		Namespace: cfg.ChallengeSecretNamespace,
 	}
+	// One set of collectors for the whole process. Registering the same
+	// ones twice panics, so they are made here and handed to whoever
+	// reports into them.
+	observed := controller.NewMetrics(ctrlmetrics.Registry)
+
 	if err := setupDataPlane(mgr, cfg, challenges, accessLog(cfg, log), log); err != nil {
 		return err
 	}
-	if err := setupCertificates(mgr, cfg, challenges, log); err != nil {
+	if err := setupCertificates(mgr, cfg, challenges, observed, log); err != nil {
 		return err
 	}
-	if err := setupAuthorizationStatus(mgr, log); err != nil {
+	if err := setupAuthorizationStatus(mgr, observed, log); err != nil {
 		return err
 	}
 	if err := setupSessionKey(mgr, cfg, log); err != nil {
@@ -316,7 +321,7 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 // asked for what and a series saying how much of it there was answer different
 // questions (ADR 0031).
 func accessLog(cfg config.Config, log logr.Logger) *proxy.AccessLog {
-	records := &proxy.AccessLog{Metrics: proxy.NewHTTPMetrics(metrics.Registry)}
+	records := &proxy.AccessLog{Metrics: proxy.NewHTTPMetrics(ctrlmetrics.Registry)}
 	if cfg.AccessLog {
 		records.Log = log.WithName("access")
 	}
@@ -329,7 +334,7 @@ func accessLog(cfg config.Config, log logr.Logger) *proxy.AccessLog {
 // what ADR 0006 asks for: every replica watches and proxies, but only one
 // places orders, or the same certificate is ordered once per replica and the
 // directory's rate limit is spent that much faster.
-func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.Store, log logr.Logger) error {
+func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.Store, metrics *controller.Metrics, log logr.Logger) error {
 	acmeLog := log.WithName("acme")
 
 	issuer := &gatedacme.Client{
@@ -359,6 +364,7 @@ func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.St
 		IngressClass: cfg.IngressClass,
 		Issuer:       issuer,
 		Recorder:     mgr.GetEventRecorderFor("gated-certificates"),
+		Metrics:      metrics,
 		Log:          log.WithName("certificates"),
 	}
 	if err := certificates.SetupWithManager(mgr); err != nil {
@@ -374,13 +380,14 @@ func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.St
 // write is the same on all of them, so letting each replica write it would
 // multiply the writes and — worse — the events by the number of replicas,
 // without any replica learning anything the others did not (ADR 0006).
-func setupAuthorizationStatus(mgr ctrl.Manager, log logr.Logger) error {
+func setupAuthorizationStatus(mgr ctrl.Manager, metrics *controller.Metrics, log logr.Logger) error {
 	recorder := mgr.GetEventRecorderFor("gated-authorization")
 
 	roles := &controller.NetworkRoleReconciler{
 		Client:   mgr.GetClient(),
 		Reader:   mgr.GetCache(),
 		Recorder: recorder,
+		Metrics:  metrics,
 		Log:      log.WithName("networkrole"),
 	}
 	if err := roles.SetupWithManager(mgr); err != nil {

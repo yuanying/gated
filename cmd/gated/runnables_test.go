@@ -129,10 +129,10 @@ func leaderOnlySetups() map[string]setup {
 				Client:    mgr.GetClient(),
 				Namespace: cfg.ChallengeSecretNamespace,
 			}
-			return setupCertificates(mgr, cfg, challenges, logr.Discard())
+			return setupCertificates(mgr, cfg, challenges, nil, logr.Discard())
 		},
 		"setupAuthorizationStatus": func(mgr ctrl.Manager) error {
-			return setupAuthorizationStatus(mgr, logr.Discard())
+			return setupAuthorizationStatus(mgr, nil, logr.Discard())
 		},
 		"setupSessionKey": func(mgr ctrl.Manager) error {
 			return setupSessionKey(mgr, testConfig(), logr.Discard())
