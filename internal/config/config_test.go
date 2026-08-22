@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"errors"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -255,6 +256,66 @@ func TestValidate(t *testing.T) {
 			mutate:  func(c *config.Config) { c.LeaderElection.RetryPeriod = c.LeaderElection.RenewDeadline },
 			invalid: []string{"leader-election-retry-period"},
 		},
+		{
+			// Naming neither is how a deployment says "do not write
+			// the status at all" (ADR 0032), so it is not a mistake.
+			name:   "publishing no address at all is a configuration",
+			mutate: func(*config.Config) {},
+		},
+		{
+			name: "a published Service and a published address may be given together",
+			mutate: func(c *config.Config) {
+				c.Publish.Services = config.ServiceRefs{{Namespace: "gated-system", Name: "gated-v6"}}
+				c.Publish.Addresses = config.Addresses{"203.0.113.10"}
+			},
+		},
+		{
+			name: "a published Service names a namespace and a name",
+			mutate: func(c *config.Config) {
+				c.Publish.Services = config.ServiceRefs{{Namespace: "gated system", Name: "gated-v4"}}
+			},
+			invalid: []string{"publish-service"},
+		},
+		{
+			name: "a published Service without a name is incomplete",
+			mutate: func(c *config.Config) {
+				c.Publish.Services = config.ServiceRefs{{Namespace: "gated-system"}}
+			},
+			invalid: []string{"publish-service"},
+		},
+		{
+			name: "a published address is an address or a hostname",
+			mutate: func(c *config.Config) {
+				c.Publish.Addresses = config.Addresses{"not an address"}
+			},
+			invalid: []string{"publish-address"},
+		},
+		{
+			name: "a published address may be a hostname",
+			mutate: func(c *config.Config) {
+				c.Publish.Addresses = config.Addresses{"gated.example.com"}
+			},
+		},
+		{
+			name: "a published address may be an IPv6 address",
+			mutate: func(c *config.Config) {
+				c.Publish.Addresses = config.Addresses{"2001:db8::1"}
+			},
+		},
+		{
+			name:    "an empty published address says nothing",
+			mutate:  func(c *config.Config) { c.Publish.Addresses = config.Addresses{""} },
+			invalid: []string{"publish-address"},
+		},
+		{
+			name:    "the shutdown delay must not run backwards",
+			mutate:  func(c *config.Config) { c.ShutdownDelay = -time.Second },
+			invalid: []string{"shutdown-delay"},
+		},
+		{
+			name:   "a shutdown delay of zero switches the wait off",
+			mutate: func(c *config.Config) { c.ShutdownDelay = 0 },
+		},
 	}
 
 	for _, tt := range tests {
@@ -330,6 +391,19 @@ func TestDefaultCarriesNoEnvironmentSpecificValues(t *testing.T) {
 	}
 	if !c.LeaderElection.Enabled {
 		t.Error("leader election default = off, want on")
+	}
+
+	// Where gated is published is environment specific and has no default;
+	// whether it records what passes through it is not, and recording is
+	// the answer that does not have to be remembered (ADR 0031).
+	if len(c.Publish.Services) != 0 || len(c.Publish.Addresses) != 0 {
+		t.Errorf("publish defaults = %v/%v, want empty", c.Publish.Services, c.Publish.Addresses)
+	}
+	if !c.AccessLog {
+		t.Error("--access-log default = off, want on")
+	}
+	if c.ShutdownDelay <= 0 {
+		t.Errorf("--shutdown-delay default = %v, want a wait long enough for an endpoint removal to spread", c.ShutdownDelay)
 	}
 	if c.LeaderElection.LeaseDuration <= c.LeaderElection.RenewDeadline ||
 		c.LeaderElection.RenewDeadline <= c.LeaderElection.RetryPeriod ||
@@ -439,6 +513,13 @@ func TestAddFlagsRoundTrip(t *testing.T) {
 	want := validConfig()
 	want.Auth.Google.ClientID = "google-client-id"
 	want.Auth.Google.ClientSecretRef = config.SecretKeyRef{Namespace: "gated-system", Name: "google-oauth", Key: "clientSecret"}
+	want.Publish.Services = config.ServiceRefs{
+		{Namespace: "gated-system", Name: "gated-v4"},
+		{Namespace: "gated-system", Name: "gated-v6"},
+	}
+	want.Publish.Addresses = config.Addresses{"203.0.113.10", "2001:db8::1"}
+	want.AccessLog = false
+	want.ShutdownDelay = 7 * time.Second
 	want.LeaderElection.LeaseDuration = 20 * time.Second
 	want.LeaderElection.RenewDeadline = 15 * time.Second
 	want.LeaderElection.RetryPeriod = 3 * time.Second
@@ -459,6 +540,14 @@ func TestAddFlagsRoundTrip(t *testing.T) {
 		"--leader-election-lease-duration=20s",
 		"--leader-election-renew-deadline=15s",
 		"--leader-election-retry-period=3s",
+		// Repeatable, so that one process can publish the addresses of
+		// more than one Service (ADR 0032).
+		"--publish-service=gated-system/gated-v4",
+		"--publish-service=gated-system/gated-v6",
+		"--publish-address=203.0.113.10",
+		"--publish-address=2001:db8::1",
+		"--access-log=false",
+		"--shutdown-delay=7s",
 	}
 
 	got, fs := config.Default(), config.NewFlagSet("gated")
@@ -466,7 +555,10 @@ func TestAddFlagsRoundTrip(t *testing.T) {
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("Parse() = %v", err)
 	}
-	if got != want {
+	// Compared field by field rather than with ==: the repeatable flags
+	// collect into slices, which is what stops a Config from being
+	// comparable.
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parsed config = %+v, want %+v", got, want)
 	}
 	if err := got.Validate(); err != nil {
@@ -481,6 +573,18 @@ func TestAddFlagsRejectsMalformedSecretRef(t *testing.T) {
 
 	if err := fs.Parse([]string{"--acme-account-secret=acme-account"}); err == nil {
 		t.Fatal("Parse() = nil, want an error for a secret reference without a namespace")
+	}
+}
+
+func TestAddFlagsRejectsMalformedPublishService(t *testing.T) {
+	for _, arg := range []string{"--publish-service=gated-v4", "--publish-service=gated-system/", "--publish-service="} {
+		c, fs := config.Default(), config.NewFlagSet("gated")
+		c.AddFlags(fs)
+		fs.SetOutput(discard{})
+
+		if err := fs.Parse([]string{arg}); err == nil {
+			t.Errorf("Parse(%q) = nil, want an error for a Service reference that is not namespace/name", arg)
+		}
 	}
 }
 
