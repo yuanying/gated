@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,7 @@ type Handler struct {
 	// Backends turns the matched backend into an address.
 	Backends BackendResolver
 	// Transport is used for the outbound request. A nil Transport uses
+	// the one gated builds for itself (ADR 0013), which is not
 	// http.DefaultTransport.
 	Transport http.RoundTripper
 	// BodyReadTimeout bounds one read of the client's request body, and
@@ -146,10 +148,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // outbound connection pool is shared across every request.
 func (h *Handler) init() {
 	h.once.Do(func() {
+		transport := h.Transport
+		if transport == nil {
+			transport = newTransport()
+		}
 		h.proxy = &httputil.ReverseProxy{
 			Rewrite:      rewrite,
-			Transport:    h.Transport,
+			Transport:    transport,
 			ErrorHandler: h.handleUpstreamError,
+			BufferPool:   newBufferPool(),
 		}
 		forward := h.guardDeadlines(http.HandlerFunc(h.forward))
 		if h.Middleware != nil {
@@ -217,4 +224,75 @@ func rewrite(pr *httputil.ProxyRequest) {
 	// on the Host header, need the name the client asked for.
 	pr.Out.Host = pr.In.Host
 	pr.SetXForwarded()
+	setRealIP(pr.Out)
+	dropGatedCookies(pr.Out)
+}
+
+// setRealIP states the one address gated observed, under the name
+// ingress-nginx used for it (ADR 0013).
+//
+// SetXForwarded has just replaced X-Forwarded-For with that address and
+// nothing else, so it is the value to copy. When it could not — an address it
+// could not parse — there is nothing to say, and the client's own claim to the
+// header goes with it.
+func setRealIP(out *http.Request) {
+	if ip := out.Header.Get("X-Forwarded-For"); ip != "" {
+		out.Header.Set("X-Real-IP", ip)
+		return
+	}
+	out.Header.Del("X-Real-IP")
+}
+
+// dropGatedCookies takes gated's own cookies out of the request on its way to
+// a backend, and leaves every other cookie exactly as it arrived (ADR 0013).
+func dropGatedCookies(out *http.Request) {
+	values := out.Header["Cookie"]
+	kept := make([]string, 0, len(values))
+	for _, value := range values {
+		// The common request carries none of them, and is left
+		// untouched rather than taken apart and put back together.
+		if !strings.Contains(value, gatedCookiePrefix) {
+			kept = append(kept, value)
+			continue
+		}
+		if remaining := withoutGatedCookies(value); remaining != "" {
+			kept = append(kept, remaining)
+		}
+	}
+	if len(kept) == 0 {
+		out.Header.Del("Cookie")
+		return
+	}
+	out.Header["Cookie"] = kept
+}
+
+// withoutGatedCookies returns one Cookie header value with gated's own cookies
+// removed, keeping the rest in the order they arrived.
+func withoutGatedCookies(value string) string {
+	var kept strings.Builder
+	for part := range strings.SplitSeq(value, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, _, _ := strings.Cut(part, "=")
+		if isGatedCookie(name) {
+			continue
+		}
+		if kept.Len() > 0 {
+			kept.WriteString("; ")
+		}
+		kept.WriteString(part)
+	}
+	return kept.String()
+}
+
+// isGatedCookie reports whether a cookie belongs to gated rather than to the
+// application behind it.
+func isGatedCookie(name string) bool {
+	switch name {
+	case SessionCookieName, LoginCookieName, StateCookieName:
+		return true
+	}
+	return false
 }

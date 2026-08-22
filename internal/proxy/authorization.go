@@ -33,6 +33,26 @@ const (
 	BindParam = "bind"
 )
 
+// The cookies gated sets on a visitor's browser.
+//
+// They are named here, rather than beside the code that sets them, because two
+// unrelated places have to agree on them: the login flow, which issues and
+// reads them, and the forwarding step, which takes them back off the request
+// so that they never reach an application (ADR 0013). A name added there and
+// forgotten here would be a credential passed on silently.
+const (
+	// gatedCookiePrefix is what every one of them starts with, and is
+	// prefixed so that it cannot collide with an application's own.
+	gatedCookiePrefix = "__gated_"
+	// SessionCookieName holds the signed session on a protected host.
+	SessionCookieName = gatedCookiePrefix + "session"
+	// LoginCookieName holds the nonce that ties a login in progress to the
+	// browser that started it.
+	LoginCookieName = gatedCookiePrefix + "login"
+	// StateCookieName holds the nonce behind the OAuth state parameter.
+	StateCookieName = gatedCookiePrefix + "state"
+)
+
 // authenticateRealm is the realm offered to clients that cannot follow a
 // redirect. BASIC is the scheme because that is the door a token comes through
 // for clients whose login command cannot be changed (ADR 0004); the realm names

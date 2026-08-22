@@ -459,3 +459,96 @@ func TestProxyRefusesBeforeItRoutes(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 }
+
+// headerOf starts a backend that records the headers it was sent, and a proxy
+// in front of it, and returns a function that makes one request and reports
+// what arrived.
+func headerOf(t *testing.T) func(set func(*http.Request)) http.Header {
+	t.Helper()
+	var got http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	t.Cleanup(backend.Close)
+
+	front := httptest.NewServer(&proxy.Handler{
+		Tables:   tableFor("app.example.com"),
+		Backends: toAddress(addressOf(t, backend)),
+	})
+	t.Cleanup(front.Close)
+
+	return func(set func(*http.Request)) http.Header {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, front.URL+"/", nil)
+		req.Host = "app.example.com"
+		set(req)
+		resp, err := front.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do() = %v", err)
+		}
+		resp.Body.Close()
+		return got
+	}
+}
+
+func TestProxyKeepsItsOwnCookiesToItself(t *testing.T) {
+	// gated's cookies are its credentials, not the application's. An
+	// application that writes request headers into a log or an error
+	// collector would put a live session somewhere it does not belong, so
+	// they come off before the request is forwarded (ADR 0013).
+	send := headerOf(t)
+
+	tests := []struct {
+		name string
+		sent string
+		want string
+	}{
+		{
+			name: "the cookies around them are kept, in order",
+			sent: "a=1; __gated_session=s; b=2; __gated_login=l; c=3; __gated_state=t; d=4",
+			want: "a=1; b=2; c=3; d=4",
+		},
+		{
+			name: "a header of nothing else is dropped altogether",
+			sent: "__gated_session=s",
+			want: "",
+		},
+		{
+			name: "a header with none of them is passed through untouched",
+			sent: "a=1;b=2",
+			want: "a=1;b=2",
+		},
+		{
+			name: "a name that merely starts the same is kept",
+			sent: "__gated_sessionish=x; __gated_session=s",
+			want: "__gated_sessionish=x",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := send(func(r *http.Request) { r.Header.Set("Cookie", tc.sent) })
+			if got.Get("Cookie") != tc.want {
+				t.Errorf("the backend saw Cookie %q, want %q", got.Get("Cookie"), tc.want)
+			}
+		})
+	}
+}
+
+func TestProxySetsXRealIP(t *testing.T) {
+	// The header ingress-nginx put there, carrying the one address gated
+	// observed rather than a list (ADR 0013). A client's own claim to it is
+	// no more believable than its claim to X-Forwarded-For.
+	send := headerOf(t)
+	got := send(func(r *http.Request) { r.Header.Set("X-Real-IP", "203.0.113.9") })
+
+	xff := got.Get("X-Forwarded-For")
+	if xff == "" {
+		t.Fatal("X-Forwarded-For is empty, want the peer address")
+	}
+	if got.Get("X-Real-IP") != xff {
+		t.Errorf("X-Real-IP = %q, want the same as X-Forwarded-For, %q", got.Get("X-Real-IP"), xff)
+	}
+	if strings.Contains(got.Get("X-Real-IP"), "203.0.113.9") {
+		t.Errorf("X-Real-IP = %q, want the client-supplied value discarded", got.Get("X-Real-IP"))
+	}
+}
