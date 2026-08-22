@@ -114,10 +114,11 @@ Identity Provider 側に登録するコールバック URL は、プロバイダ
 （`--http-addr` / `--https-addr` / `--metrics-addr` / `--health-probe-addr`）、
 担当する IngressClass 名（`--ingress-class`、既定 `gated`）、リーダー選出の
 タイムアウト（`--leader-election-*`）、セッションの寿命（`--session-ttl`、既定
-12時間）、Identity Provider のエンドポイント（`--github-base-url` /
-`--github-api-url` / `--google-issuer`）である。最後の3つは GitHub Enterprise を
-使う場合とテスト用のモック IdP を使う場合にだけ変える（ADR 0021）。全体は
-`gated --help` で確認できる。
+12時間）、アクセスログの有無（`--access-log`、既定 on）、停止を求められてから
+リスナーを閉じるまでの待ち（`--shutdown-delay`、既定 5秒）、Identity Provider の
+エンドポイント（`--github-base-url` / `--github-api-url` / `--google-issuer`）で
+ある。最後の3つは GitHub Enterprise を使う場合とテスト用のモック IdP を使う場合に
+だけ変える（ADR 0021）。全体は `gated --help` で確認できる。
 
 このうち `--acme-account-secret` / `--session-key-secret` /
 `--challenge-secret-namespace` / `--leader-election-namespace` は
@@ -125,6 +126,21 @@ Identity Provider 側に登録するコールバック URL は、プロバイダ
 いる namespace」を指すだけなので、Downward API で解決してある。overlay で足す
 必要があるのは、残りの `--acme-directory-url` / `--acme-email` / `--auth-host`
 と、Identity Provider の2〜3個である。
+
+`--shutdown-delay` は、Pod が endpoints から外れるより先に SIGTERM が届いたときの
+502 を減らすためのものである。イメージにシェルが無いので `preStop` の sleep は
+使えず、gated 自身が待つ（ADR 0023）。`terminationGracePeriodSeconds` はこの待ちを
+含む長さにする。
+
+外部アドレスの書き戻しは、指定したときだけ行う（ADR 0032）。
+
+| フラグ | 内容 |
+|---|---|
+| `--publish-service` | この Service の `status.loadBalancer.ingress[]` を、担当する Ingress の status に写す（`namespace/name`、繰り返し可） |
+| `--publish-address` | アドレスまたはホスト名をそのまま書く（繰り返し可）。`--publish-service` と併用でき、結果は両者の和 |
+
+どちらも指定しなければ Ingress の status には触れない。起動は拒否しない。書くのは
+gated が担当する Ingress だけで、担当を外れた Ingress に書いた値は消さない。
 
 中央認証ホストにも TLS 証明書が要るので、`--auth-host` の名前を `spec.tls` に
 含む Ingress を1つ用意する。バックエンドは何でもよい。ログインの経路は
@@ -469,6 +485,8 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 | `AccessToken` の `lastUsedTime` 書き戻し | 全レプリカ |
 | ACME による証明書の取得・更新 | リーダーのみ |
 | `NetworkRole` / `NetworkRoleBinding` の status 書き戻し | リーダーのみ |
+| Ingress の `status.loadBalancer` 書き戻し | リーダーのみ |
+| 証明書と `NetworkRole` のメトリクス | リーダーのみ |
 | セッション署名鍵の生成 | リーダーのみ |
 | `AccessToken` のトークン生成と Secret への書き込み | リーダーのみ |
 
@@ -479,6 +497,57 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 既にある証明書は Secret にあり、どのレプリカもそれで TLS を終端できる。認可の判定も
 全レプリカが行うので、トラフィックは流れ続ける。後任は Lease が満了した時点で決まる
 （ADR 0019）。
+
+## ログとメトリクス
+
+### アクセスログ
+
+1リクエスト 1 行を `Info` で出す。既定で有効で、`--access-log=false` で切れる。
+切ってもメトリクスは出る（ADR 0031）。
+
+| 項目 | 内容 |
+|---|---|
+| `client` | 接続元のアドレス（ポートを除く） |
+| `method` / `host` / `path` | リクエスト行と `Host`。**パスにクエリ文字列は含めない** |
+| `status` | 応答したステータス。Upgrade が成立した接続は 101 |
+| `bytes` | クライアントへ書いた本体の量 |
+| `duration` | ハンドラに入ってから出るまで |
+| `subject` | 認可が名指した主体。無ければ空 |
+| `ingress` | ルーティングが選んだ Ingress の namespace と name。一致しなければ空 |
+| `proto` | `HTTP/1.1` / `HTTP/2.0`、Upgrade 後は `ws` |
+| `upstreamError` | 502 で終わったか |
+
+クエリ文字列・`Authorization`・`Cookie` は書かない。クエリ文字列にはログイン完了時
+の一度きりのトークンが乗り、残りの2つはそのまま資格情報だからである。
+
+`client` は gated が接続を受けた相手であり、必ずしも本当のクライアントではない。
+手前で送信元アドレスが書き換わる構成では書き換え後の値になる。gated はクライアントの
+申告する `X-Forwarded-For` で補正しない（ADR 0013）。
+
+### メトリクス
+
+`--metrics-addr`（既定 `:9090`）の `/metrics` に、controller-runtime 自身の
+メトリクスと並んで出る。
+
+| 名前 | 種類 | ラベル |
+|---|---|---|
+| `gated_http_requests_total` | counter | `ingress_namespace`, `ingress_name`, `method`, `code` |
+| `gated_http_request_duration_seconds` | histogram | `ingress_namespace`, `ingress_name` |
+| `gated_upstream_errors_total` | counter | `ingress_namespace`, `ingress_name` |
+| `gated_certificate_not_after_timestamp_seconds` | gauge | `namespace`, `secret`, `host` |
+| `gated_certificate_renewal_failures` | gauge | `namespace`, `secret` |
+| `gated_networkrole_target_resolved` | gauge (0/1) | `namespace`, `name` |
+
+ラベルにパス・クライアントアドレス・主体を入れない。値の種類に上限が無く、時系列が
+際限なく増えるためである。ホスト名も入れない。例外は証明書の期限だけで、証明書は
+ホストに対して発行されるものであり、期限を読むときに知りたいのはホストだからである。
+
+下の3つはリーダーだけが出す（ADR 0006）。リーダーでないレプリカにこの3つは無い。
+alert はレプリカをまたいで読むことになる。対象が消えたら時系列も消すので、
+「消えた証明書の期限」や「消えた `NetworkRole` の未解決」は残らない。
+
+`gated_upstream_errors_total` はエッジで観測した 502 を数える。gated がバックエンドに
+到達できずに返した 502 と、バックエンド自身が返した 502 は区別していない。
 
 ## Status
 
