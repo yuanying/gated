@@ -15,8 +15,10 @@ import (
 
 // Config is the complete startup configuration of a gated process.
 //
-// It is deliberately comparable so tests can assert on a whole configuration
-// at once; keep it free of slices and maps.
+// The repeatable flags — the Services and addresses an Ingress's status is
+// published from — are slices, so a Config is not comparable. Everything else
+// is a scalar, and adding a map here would take away the last thing that makes
+// a whole configuration easy to assert on.
 type Config struct {
 	// HTTPAddr is the listen address for plain HTTP. It serves the ACME
 	// HTTP-01 challenge and, for everything else, a redirect to HTTPS.
@@ -37,11 +39,42 @@ type Config struct {
 	ACME           ACME
 	Auth           Auth
 	LeaderElection LeaderElection
+	Publish        Publish
+
+	// AccessLog records one line per request (ADR 0031). On unless it is
+	// switched off: a process that keeps no record of what passed through
+	// it should be that way because somebody decided so.
+	AccessLog bool
+
+	// ShutdownDelay is how long gated keeps serving after it is asked to
+	// stop, before it starts draining. Removing a Pod from a Service's
+	// endpoints and sending it SIGTERM are independent, so a replica that
+	// stops listening the moment it is signalled refuses the requests that
+	// were routed to it in between. The image carries no shell, so this is
+	// gated's own wait rather than a preStop hook's.
+	ShutdownDelay time.Duration
 
 	// ChallengeSecretNamespace is where the HTTP-01 challenge tokens are
 	// written so that every replica can answer them (ADR 0006).
 	ChallengeSecretNamespace string
 }
+
+// Publish names where the external addresses written into the status of the
+// Ingresses gated is responsible for come from (ADR 0032).
+//
+// The two are added together. Naming neither is the way to say that gated
+// should not write the status at all, and is not a startup failure: gated does
+// everything else without knowing how it is published.
+type Publish struct {
+	// Services are read for their status.loadBalancer.ingress[].
+	Services ServiceRefs
+	// Addresses are written as they stand, for a deployment that is not
+	// published through a Service at all.
+	Addresses Addresses
+}
+
+// IsZero reports whether nothing at all was named to publish.
+func (p Publish) IsZero() bool { return len(p.Services) == 0 && len(p.Addresses) == 0 }
 
 // ACME configures the built-in ACME client (ADR 0005).
 type ACME struct {
@@ -126,6 +159,11 @@ func Default() Config {
 		MetricsAddr:     ":9090",
 		HealthProbeAddr: ":9091",
 		IngressClass:    "gated",
+		AccessLog:       true,
+		// Long enough for an endpoint removal to reach the kube-proxy of
+		// every node, short enough to stay well inside the grace period
+		// the Deployment allows.
+		ShutdownDelay: 5 * time.Second,
 		Auth: Auth{
 			SessionTTL: 12 * time.Hour,
 			GitHub: GitHubClient{
@@ -190,6 +228,15 @@ func (c *Config) AddFlags(fs *flag.FlagSet) {
 		"Secret entry holding the Google OAuth client secret, as namespace/name/key.")
 	fs.StringVar(&c.Auth.Google.Issuer, "google-issuer", c.Auth.Google.Issuer,
 		"OpenID Connect issuer of the Google accounts to accept.")
+
+	fs.Var(&c.Publish.Services, "publish-service",
+		"Service whose external addresses are written into the status of the Ingresses gated is responsible for, as namespace/name. Repeatable.")
+	fs.Var(&c.Publish.Addresses, "publish-address",
+		"Address or hostname written into the status of the Ingresses gated is responsible for. Repeatable, and added to whatever --publish-service resolves to.")
+	fs.BoolVar(&c.AccessLog, "access-log", c.AccessLog,
+		"Write one line per request. The query string, the Authorization header and cookies are never written.")
+	fs.DurationVar(&c.ShutdownDelay, "shutdown-delay", c.ShutdownDelay,
+		"How long to keep serving after being asked to stop, so that this replica's removal from the endpoints has time to spread.")
 
 	fs.StringVar(&c.ChallengeSecretNamespace, "challenge-secret-namespace", c.ChallengeSecretNamespace,
 		"Namespace the ACME HTTP-01 challenge tokens are written to. Required.")

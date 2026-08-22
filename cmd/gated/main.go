@@ -21,6 +21,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/yuanying/gated/internal/accesstoken"
@@ -107,13 +109,21 @@ func run(args []string) error {
 		Client:    mgr.GetClient(),
 		Namespace: cfg.ChallengeSecretNamespace,
 	}
-	if err := setupDataPlane(mgr, cfg, challenges, log); err != nil {
+	// One set of collectors for the whole process. Registering the same
+	// ones twice panics, so they are made here and handed to whoever
+	// reports into them.
+	observed := controller.NewMetrics(ctrlmetrics.Registry)
+
+	if err := setupDataPlane(mgr, cfg, challenges, accessLog(cfg, log), log); err != nil {
 		return err
 	}
-	if err := setupCertificates(mgr, cfg, challenges, log); err != nil {
+	if err := setupCertificates(mgr, cfg, challenges, observed, log); err != nil {
 		return err
 	}
-	if err := setupAuthorizationStatus(mgr, log); err != nil {
+	if err := setupAuthorizationStatus(mgr, observed, log); err != nil {
+		return err
+	}
+	if err := setupIngressStatus(mgr, cfg, log); err != nil {
 		return err
 	}
 	if err := setupSessionKey(mgr, cfg, log); err != nil {
@@ -134,12 +144,43 @@ func run(args []string) error {
 	// SetupSignalHandler cancels the context on the first SIGINT or SIGTERM
 	// and aborts the process on the second, so a stuck shutdown can still be
 	// interrupted. Start returns once every runnable has stopped.
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(afterShutdownDelay(ctrl.SetupSignalHandler(), cfg.ShutdownDelay, log)); err != nil {
 		return fmt.Errorf("running the manager: %w", err)
 	}
 
 	log.Info("stopped")
 	return nil
+}
+
+// afterShutdownDelay returns a context that is cancelled the delay after
+// parent is, so that gated goes on serving for a moment after it is asked to
+// stop.
+//
+// Removing a Pod from a Service's endpoints and sending it SIGTERM are
+// independent: the signal can arrive before every kube-proxy has stopped
+// sending traffic here, and a replica that closes its listeners at once
+// refuses whatever was routed to it in between. A Deployment usually buys that
+// moment with a preStop hook that sleeps, but the image carries a single
+// executable and no shell (see the Dockerfile), so the wait is gated's own.
+//
+// The second signal is unaffected: it aborts the process through the handler
+// this wraps, so a shutdown that will not finish can still be cut short.
+func afterShutdownDelay(parent context.Context, delay time.Duration, log logr.Logger) context.Context {
+	if delay <= 0 {
+		return parent
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-parent.Done()
+		log.Info("asked to stop; still answering while this replica leaves the endpoints", "delay", delay)
+
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		<-timer.C
+		cancel()
+	}()
+	return ctx
 }
 
 // setupDataPlane wires the routing table, the reverse proxy and the two
@@ -148,7 +189,7 @@ func run(args []string) error {
 // Everything here runs on every replica. Only certificate issuance is the
 // leader's job (ADR 0006), so nothing in this path may be gated on the lease:
 // a replica that loses it must keep serving traffic.
-func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Source, log logr.Logger) error {
+func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Source, records *proxy.AccessLog, log logr.Logger) error {
 	tables := &proxy.TableStore{}
 
 	routes := &controller.RoutingReconciler{
@@ -265,8 +306,14 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		// forwarded: the token is read first so that the decision has a
 		// subject to work from, and the decision itself is unchanged by
 		// where that subject came from (ADR 0018).
+		// Observe appears twice because the two things the access log
+		// wants are settled at different depths: the route is known as
+		// soon as the proxy has matched, and the principal only once
+		// the decision has named one. A request that is refused passes
+		// the first and not the second, and is still recorded against
+		// the Ingress it was aimed at (ADR 0031).
 		Middleware: func(next http.Handler) http.Handler {
-			return tokens.Wrap(decision.Wrap(next))
+			return proxy.Observe(tokens.Wrap(decision.Wrap(proxy.Observe(next))))
 		},
 		Log: log.WithName("proxy"),
 	}
@@ -276,19 +323,23 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		HTTPSAddr: cfg.HTTPSAddr,
 		// The login sits in front of everything else: the paths it
 		// claims are answered by gated itself and never routed,
-		// authorised or forwarded (ADR 0018).
-		Handler: &authn.Router{
+		// authorised or forwarded (ADR 0018). The access log is
+		// outside even that, so that the login flow is recorded too.
+		Handler: records.Wrap(&authn.Router{
 			AuthHost: cfg.Auth.Host,
 			Central:  central,
 			Callback: protected,
 			Next:     dataPlane,
-		},
+		}),
 		// Answering challenges is every replica's job, not the
 		// leader's: the CA reaches whichever replica the load balancer
 		// hands it (ADR 0006).
 		InsecureHandler: &proxy.InsecureHandler{
 			Solver: &http01.Responder{Source: challenges, Log: log.WithName("acme-http01")},
-			Log:    log.WithName("http"),
+			// A name nothing routes is answered 404 here rather than
+			// sent to HTTPS to be answered 404 there (ADR 0030).
+			Hosts: tables,
+			Log:   log.WithName("http"),
 		},
 		TLSConfig:       certificates.TLSConfig(),
 		ShutdownTimeout: proxyDrainTimeout,
@@ -300,13 +351,28 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 	return nil
 }
 
+// accessLog builds the record kept of what passes through the edge.
+//
+// The counters are registered with the metrics registry the manager already
+// serves, so gated exposes one endpoint rather than two. Switching the log off
+// takes away the logger and leaves the counters, because a line saying who
+// asked for what and a series saying how much of it there was answer different
+// questions (ADR 0031).
+func accessLog(cfg config.Config, log logr.Logger) *proxy.AccessLog {
+	records := &proxy.AccessLog{Metrics: proxy.NewHTTPMetrics(ctrlmetrics.Registry)}
+	if cfg.AccessLog {
+		records.Log = log.WithName("access")
+	}
+	return records
+}
+
 // setupCertificates wires the ACME client and the reconciler that drives it.
 //
 // The reconciler is leader elected, which is controller-runtime's default and
 // what ADR 0006 asks for: every replica watches and proxies, but only one
 // places orders, or the same certificate is ordered once per replica and the
 // directory's rate limit is spent that much faster.
-func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.Store, log logr.Logger) error {
+func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.Store, metrics *controller.Metrics, log logr.Logger) error {
 	acmeLog := log.WithName("acme")
 
 	issuer := &gatedacme.Client{
@@ -336,10 +402,45 @@ func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.St
 		IngressClass: cfg.IngressClass,
 		Issuer:       issuer,
 		Recorder:     mgr.GetEventRecorderFor("gated-certificates"),
+		Metrics:      metrics,
 		Log:          log.WithName("certificates"),
 	}
 	if err := certificates.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("registering the certificate controller: %w", err)
+	}
+	return nil
+}
+
+// setupIngressStatus wires the reconciler that writes the address gated is
+// reachable at into the Ingresses it is responsible for.
+//
+// It is leader elected. Every replica would write the same value, so letting
+// them all write it multiplies the updates by the number of replicas and tells
+// whoever reads the Ingress nothing more (ADR 0006, ADR 0032).
+//
+// Nothing is registered at all when no address was named. That is a deployment
+// saying it does not want its Ingress status touched, and the way to honour it
+// is to have nothing watching for a reason to touch it.
+func setupIngressStatus(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error {
+	if cfg.Publish.IsZero() {
+		return nil
+	}
+
+	services := make([]types.NamespacedName, 0, len(cfg.Publish.Services))
+	for _, ref := range cfg.Publish.Services {
+		services = append(services, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name})
+	}
+
+	status := &controller.IngressStatusReconciler{
+		Client:       mgr.GetClient(),
+		Reader:       mgr.GetCache(),
+		IngressClass: cfg.IngressClass,
+		Services:     services,
+		Addresses:    cfg.Publish.Addresses,
+		Log:          log.WithName("ingress-status"),
+	}
+	if err := status.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the Ingress status controller: %w", err)
 	}
 	return nil
 }
@@ -351,13 +452,14 @@ func setupCertificates(mgr ctrl.Manager, cfg config.Config, challenges http01.St
 // write is the same on all of them, so letting each replica write it would
 // multiply the writes and — worse — the events by the number of replicas,
 // without any replica learning anything the others did not (ADR 0006).
-func setupAuthorizationStatus(mgr ctrl.Manager, log logr.Logger) error {
+func setupAuthorizationStatus(mgr ctrl.Manager, metrics *controller.Metrics, log logr.Logger) error {
 	recorder := mgr.GetEventRecorderFor("gated-authorization")
 
 	roles := &controller.NetworkRoleReconciler{
 		Client:   mgr.GetClient(),
 		Reader:   mgr.GetCache(),
 		Recorder: recorder,
+		Metrics:  metrics,
 		Log:      log.WithName("networkrole"),
 	}
 	if err := roles.SetupWithManager(mgr); err != nil {

@@ -19,6 +19,12 @@ package controller
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch
 
+// The address gated is reachable at is written back into the status of the
+// Ingresses it is responsible for (ADR 0032). The subresource only: the spec
+// belongs to whoever wrote the Ingress, and gated never edits it.
+//
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses/status,verbs=get;update;patch
+
 // The proxy resolves a routed backend to the Service's cluster IP (ADR 0013),
 // so it reads Services and nothing else about a workload.
 //

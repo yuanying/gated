@@ -60,6 +60,8 @@ func (c Config) Validate() error {
 	c.validateAuth(report)
 	c.validateChallenge(report)
 	c.validateLeaderElection(report)
+	c.validatePublish(report)
+	c.validateShutdown(report)
 
 	return errors.Join(errs...)
 }
@@ -226,6 +228,49 @@ func (c Config) validateChallenge(report reportFunc) {
 	if msgs := k8svalidation.IsDNS1123Label(c.ChallengeSecretNamespace); len(msgs) > 0 {
 		report("challenge-secret-namespace", "%q is not a valid namespace: %s",
 			c.ChallengeSecretNamespace, strings.Join(msgs, "; "))
+	}
+}
+
+// validatePublish checks the two ways of naming what to write into an
+// Ingress's status. Naming neither is not a problem: it is how a deployment
+// says gated should not write the status at all (ADR 0032).
+func (c Config) validatePublish(report reportFunc) {
+	for _, ref := range c.Publish.Services {
+		if ref.Namespace == "" || ref.Name == "" {
+			report("publish-service", "%q is not of the form namespace/name", ref.String())
+			continue
+		}
+		if msgs := k8svalidation.IsDNS1123Label(ref.Namespace); len(msgs) > 0 {
+			report("publish-service", "namespace %q is not valid: %s", ref.Namespace, strings.Join(msgs, "; "))
+		}
+		if msgs := k8svalidation.IsDNS1123Subdomain(ref.Name); len(msgs) > 0 {
+			report("publish-service", "name %q is not valid: %s", ref.Name, strings.Join(msgs, "; "))
+		}
+	}
+
+	// An address goes into status.loadBalancer.ingress[] as either an ip or
+	// a hostname, and the API server validates each as its own kind. Sorting
+	// them out here means a typo is a refusal to start rather than a status
+	// update the API server rejects for as long as the process runs.
+	for _, addr := range c.Publish.Addresses {
+		if addr == "" {
+			report("publish-address", "is empty")
+			continue
+		}
+		if net.ParseIP(addr) != nil {
+			continue
+		}
+		if msgs := k8svalidation.IsDNS1123Subdomain(addr); len(msgs) > 0 {
+			report("publish-address", "%q is neither an IP address nor a hostname: %s", addr, strings.Join(msgs, "; "))
+		}
+	}
+}
+
+// validateShutdown checks the wait between being asked to stop and starting to
+// drain. Zero is allowed and means "start draining at once".
+func (c Config) validateShutdown(report reportFunc) {
+	if c.ShutdownDelay < 0 {
+		report("shutdown-delay", "must not be negative")
 	}
 }
 

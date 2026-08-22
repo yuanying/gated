@@ -1,6 +1,7 @@
 # 0002. 認可モデル: NetworkRole と NetworkRoleBinding
 
 - Date: 2026-08-21
+- Updated: 2026-08-22（`gate.unstable.cloud` への書き込み権限が何を意味するかを、信頼境界として明記した。決定は変えていない）
 - Status: Accepted
 
 ## Context
@@ -63,6 +64,18 @@ RBAC の素直な解釈では未認証で権限が無ければ拒否だが、Web
 
 ただしリダイレクトは相手がブラウザである場合に限る。`Accept` ヘッダが HTML を求めていない場合はリダイレクトせず、401 と `WWW-Authenticate` を返す。API クライアントを 302 でログイン画面に飛ばしても意味がないためである。
 
+### 書き込み権限が公開範囲の決定権であること
+
+`NetworkRole` の `targetRef` は namespace を持ち、自分と別の namespace の Ingress を名指しできる。判定は許可の和である（後述）。この2つを合わせると、**どこか1つでも namespace に `NetworkRole` と `NetworkRoleBinding` を書ける主体は、クラスター内のどの保護対象でも `system:unauthenticated` に開放できる**。
+
+これは設計として受け入れる。`NetworkRoleBinding` の `roleRef` は同じ namespace の `NetworkRole` にしか届かないので、権限を「借りて」くることはできない。越境するのは `NetworkRole` 自身の `targetRef` であり、それは ADR が最初に選んだ形——保護対象を名前で指す——の直接の帰結である。ホスト名やパスで指す形にしても、指せる範囲が変わるだけで越境は無くならない。
+
+したがって次を明記する。**`gate.unstable.cloud` の `NetworkRole` / `NetworkRoleBinding` に対する書き込み権限は、HTTP の公開範囲についてクラスター管理者相当の権限である。** 特定の namespace に閉じた権限ではない。この2つのリソースへの `create` / `update` を与えることは、その相手にクラスター全体の公開範囲を触らせることに等しい。
+
+Gateway API の `ReferenceGrant` にあたる仕組み——指される側が越境参照を許可する——は導入しない。それが要るのは、namespace を信頼境界として使う、つまり互いを信頼しない複数の主体が同じクラスターに同居する場合である。そうなった時点で、この決定は見直しになる。
+
+同じ性質は Ingress 自身にもある。標準の Ingress はどの namespace からでも任意のホスト名を主張でき、gated は衝突を作成時刻で決める（ADR 0012）。Ingress を書ける主体は、既に他人のホスト名を主張できる。上の決定はその上に乗るものであって、新しく境界を弱めるものではない。
+
 ### 参照されていない Ingress の扱い
 
 どの `NetworkRole` からも参照されていない Ingress は、認証なしで素通しする（fail-open）。
@@ -80,6 +93,8 @@ RBAC の素直な解釈では未認証で権限が無ければ拒否だが、Web
 代償として、`kubectl auth can-i` は使えない。権限が実際にどう効いているかを確かめる手段を自分で用意する必要がある。
 
 fail-open を選んだため、`targetRef` の namespace や name を打ち間違えると、保護したつもりの Ingress が無防備になる。この失敗は静かに起きるので、`NetworkRole` の `status` に「解決できた対象 Ingress」を書き戻し、解決できなかった参照を検知できるようにしなければならない。
+
+書き込み権限を信頼境界と定めたため、この2つの CRD を触れる ServiceAccount を増やすことは、公開範囲の決定権を配ることになる。RBAC を書くときに `gate.unstable.cloud` を「アプリの設定と同じ扱い」で許可してはならない。
 
 パスとメソッドまで見る粒度を選んだため、複数の `NetworkRole` が同じ Ingress の重なるパスに対して異なる権限を与える状況が起こりうる。RBAC と同じく**許可の和**とし、拒否のルールは持たない。どれか1つでも許せば通る、という単純な規則にすることで、評価順序に依存しない判定にする。
 

@@ -142,3 +142,60 @@ func TestChallengePathIsMatchedExactly(t *testing.T) {
 		t.Errorf("status = %d, want a redirect", resp.StatusCode)
 	}
 }
+
+// hostSet answers for a fixed set of names, standing in for the routing table
+// the plain listener consults.
+type hostSet map[string]bool
+
+func (s hostSet) HasHost(host string) bool { return s[host] }
+
+func TestInsecureHandlerRedirectsOnlyHostsItRoutes(t *testing.T) {
+	// Redirecting a name gated has no route for tells a scanner that
+	// something answers here, and then answers 404 on the other side
+	// anyway. With a set of hosts to consult, the 404 comes first.
+	h := &proxy.InsecureHandler{Hosts: hostSet{"app.example.com": true}}
+
+	if resp := do(h, http.MethodGet, "app.example.com", "/a"); resp.StatusCode != http.StatusPermanentRedirect {
+		t.Errorf("a routed host: status = %d, want %d", resp.StatusCode, http.StatusPermanentRedirect)
+	}
+	resp := do(h, http.MethodGet, "nobody.example.org", "/a")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("an unrouted host: status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	if got := resp.Header.Get("Location"); got != "" {
+		t.Errorf("an unrouted host: Location = %q, want no redirect", got)
+	}
+}
+
+func TestInsecureHandlerRedirectsEveryHostWithoutASet(t *testing.T) {
+	// A handler with no set of hosts to consult keeps redirecting
+	// everything, which is what it has always done and what the tests above
+	// this one describe.
+	resp := do(&proxy.InsecureHandler{}, http.MethodGet, "nobody.example.org", "/a")
+	if resp.StatusCode != http.StatusPermanentRedirect {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusPermanentRedirect)
+	}
+}
+
+func TestInsecureHandlerAnswersChallengesForAnyHost(t *testing.T) {
+	// The validation server reaches whichever replica the load balancer
+	// hands it, and asks for a name that may have no route yet — a
+	// certificate is ordered before the Ingress it belongs to serves
+	// anything. Answering a challenge therefore cannot depend on the
+	// routing table (ADR 0015).
+	h := &proxy.InsecureHandler{
+		Hosts: hostSet{"app.example.com": true},
+		Solver: solverFunc(func(_ context.Context, host, token string) (string, bool) {
+			return "key-auth-for-" + host + "-" + token, true
+		}),
+	}
+
+	resp := do(h, http.MethodGet, "brand-new.example.org", proxy.ChallengePath+"token")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if want := "key-auth-for-brand-new.example.org-token"; string(body) != want {
+		t.Errorf("body = %q, want %q", body, want)
+	}
+}

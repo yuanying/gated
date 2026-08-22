@@ -13,8 +13,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -72,8 +74,18 @@ type Handler struct {
 	// Backends turns the matched backend into an address.
 	Backends BackendResolver
 	// Transport is used for the outbound request. A nil Transport uses
+	// the one gated builds for itself (ADR 0013), which is not
 	// http.DefaultTransport.
 	Transport http.RoundTripper
+	// BodyReadTimeout bounds one read of the client's request body, and
+	// is renewed before each read: it is the gap between two reads that is
+	// bounded, not the transfer. Zero uses the value in ADR 0030.
+	BodyReadTimeout time.Duration
+	// ResponseWriteTimeout bounds one write to the client, and is renewed
+	// before each write: it is a client that stops reading that it ends,
+	// not a response that is slow to produce. Zero uses the value in
+	// ADR 0030.
+	ResponseWriteTimeout time.Duration
 	// Middleware wraps the forwarding step. The route has already been
 	// resolved by the time it runs, so authentication and authorisation can
 	// read it from the request context. A nil Middleware forwards directly.
@@ -110,6 +122,16 @@ func MatchFromContext(ctx context.Context) (routing.Match, bool) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Before anything reads the path: a path that gated and the backend
+	// would resolve differently is refused rather than routed, because
+	// authorisation compares it as a string and would be reading the
+	// wrong one (ADR 0012).
+	if err := routing.CheckPath(r.URL.Path, r.URL.RawPath); err != nil {
+		h.Log.V(1).Info("refusing a path that is not in canonical form", "host", r.Host)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	match, ok := h.Tables.Load().Match(r.Host, r.URL.Path)
 	if !ok {
 		// Nothing claims this host and path, including before the first
@@ -126,12 +148,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // outbound connection pool is shared across every request.
 func (h *Handler) init() {
 	h.once.Do(func() {
+		transport := h.Transport
+		if transport == nil {
+			transport = newTransport()
+		}
 		h.proxy = &httputil.ReverseProxy{
 			Rewrite:      rewrite,
-			Transport:    h.Transport,
+			Transport:    transport,
 			ErrorHandler: h.handleUpstreamError,
+			BufferPool:   newBufferPool(),
 		}
-		forward := http.HandlerFunc(h.forward)
+		forward := h.guardDeadlines(http.HandlerFunc(h.forward))
 		if h.Middleware != nil {
 			h.chain = h.Middleware(forward)
 			return
@@ -165,6 +192,15 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request) {
 // handleUpstreamError turns a failed outbound request into a 502. A client
 // that went away is not an upstream failure and gets no response at all.
 func (h *Handler) handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
+	// A body that stopped arriving takes its connection down with it, and
+	// the forwarded request then fails as a cancellation. Without saying so
+	// here, the client would be answered 200 for a request whose body never
+	// reached the backend.
+	if state, ok := transferFromContext(r.Context()); ok && state.bodyTimedOut.Load() {
+		h.Log.V(1).Info("the client stopped sending its request body", "host", r.Host)
+		http.Error(w, "the request body stopped arriving", http.StatusRequestTimeout)
+		return
+	}
 	if errors.Is(err, context.Canceled) {
 		return
 	}
@@ -188,4 +224,75 @@ func rewrite(pr *httputil.ProxyRequest) {
 	// on the Host header, need the name the client asked for.
 	pr.Out.Host = pr.In.Host
 	pr.SetXForwarded()
+	setRealIP(pr.Out)
+	dropGatedCookies(pr.Out)
+}
+
+// setRealIP states the one address gated observed, under the name
+// ingress-nginx used for it (ADR 0013).
+//
+// SetXForwarded has just replaced X-Forwarded-For with that address and
+// nothing else, so it is the value to copy. When it could not — an address it
+// could not parse — there is nothing to say, and the client's own claim to the
+// header goes with it.
+func setRealIP(out *http.Request) {
+	if ip := out.Header.Get("X-Forwarded-For"); ip != "" {
+		out.Header.Set("X-Real-IP", ip)
+		return
+	}
+	out.Header.Del("X-Real-IP")
+}
+
+// dropGatedCookies takes gated's own cookies out of the request on its way to
+// a backend, and leaves every other cookie exactly as it arrived (ADR 0013).
+func dropGatedCookies(out *http.Request) {
+	values := out.Header["Cookie"]
+	kept := make([]string, 0, len(values))
+	for _, value := range values {
+		// The common request carries none of them, and is left
+		// untouched rather than taken apart and put back together.
+		if !strings.Contains(value, gatedCookiePrefix) {
+			kept = append(kept, value)
+			continue
+		}
+		if remaining := withoutGatedCookies(value); remaining != "" {
+			kept = append(kept, remaining)
+		}
+	}
+	if len(kept) == 0 {
+		out.Header.Del("Cookie")
+		return
+	}
+	out.Header["Cookie"] = kept
+}
+
+// withoutGatedCookies returns one Cookie header value with gated's own cookies
+// removed, keeping the rest in the order they arrived.
+func withoutGatedCookies(value string) string {
+	var kept strings.Builder
+	for part := range strings.SplitSeq(value, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, _, _ := strings.Cut(part, "=")
+		if isGatedCookie(name) {
+			continue
+		}
+		if kept.Len() > 0 {
+			kept.WriteString("; ")
+		}
+		kept.WriteString(part)
+	}
+	return kept.String()
+}
+
+// isGatedCookie reports whether a cookie belongs to gated rather than to the
+// application behind it.
+func isGatedCookie(name string) bool {
+	switch name {
+	case SessionCookieName, LoginCookieName, StateCookieName:
+		return true
+	}
+	return false
 }

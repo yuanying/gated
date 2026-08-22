@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -80,6 +81,9 @@ type CertificateReconciler struct {
 	Policy certs.Policy
 	// Recorder reports what happened against the Ingress. Required.
 	Recorder record.EventRecorder
+	// Metrics receives the expiry and the failure count of each certificate
+	// (ADR 0031). A nil Metrics reports nothing.
+	Metrics *Metrics
 	// RetryBaseDelay and RetryMaxDelay bound the backoff between attempts.
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
@@ -93,6 +97,11 @@ type CertificateReconciler struct {
 	// event can say how long this has been going on. The work queue owns
 	// the backoff itself.
 	attempts map[types.NamespacedName]int
+	// published records which Secrets each Ingress last named. An Ingress
+	// that has gone away, or that has stopped being ours, no longer says
+	// which Secrets it used to name, and its series would otherwise be
+	// reported for as long as the process runs.
+	published map[types.NamespacedName][]types.NamespacedName
 }
 
 // Reconcile brings every tls block of one Ingress up to date.
@@ -104,7 +113,7 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req reconcile.Req
 	var ing networkingv1.Ingress
 	if err := r.Reader.Get(ctx, req.NamespacedName, &ing); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.forgetNamespace(req.Namespace, req.Name)
+			r.forgetIngress(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -115,8 +124,12 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req reconcile.Req
 		return ctrl.Result{}, err
 	}
 	if !ingress.Selected(&ing, classes.Items, r.IngressClass) {
+		// Somebody else's now. What was reported about it was
+		// reported by us, and stops being true here.
+		r.forgetIngress(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
+	r.taking(req.NamespacedName, secretsOf(&ing))
 
 	var (
 		failures []error
@@ -166,8 +179,17 @@ func (r *CertificateReconciler) ensure(ctx context.Context, ing *networkingv1.In
 	decision := r.policy().Evaluate(materialOf(secret), hosts, r.now())
 	log := r.Log.WithValues("ingress", client.ObjectKeyFromObject(ing), "secret", key, "hosts", hosts)
 
+	// Usable is false when what is in place cannot serve these hosts at
+	// all, and then there is no expiry to report until an order succeeds.
+	covered := hosts
+	if !decision.Usable {
+		covered = nil
+	}
+	r.Metrics.SetCertificateExpiry(key.Namespace, key.Name, covered, decision.NotAfter)
+
 	if !decision.Renew {
 		r.forget(key)
+		r.Metrics.SetCertificateRenewalFailures(key.Namespace, key.Name, 0)
 		log.V(1).Info("the certificate in place is current", "reason", string(decision.Reason))
 		return r.until(decision), nil
 	}
@@ -182,6 +204,7 @@ func (r *CertificateReconciler) ensure(ctx context.Context, ing *networkingv1.In
 	keypair, err := r.Issuer.Obtain(ctx, hosts)
 	if err != nil {
 		attempt := r.failed(key)
+		r.Metrics.SetCertificateRenewalFailures(key.Namespace, key.Name, attempt)
 		// Nothing is written on this path. That is the whole of how
 		// ADR 0005's requirement is met: a renewal that cannot be
 		// completed leaves the certificate already in place untouched,
@@ -200,6 +223,7 @@ func (r *CertificateReconciler) ensure(ctx context.Context, ing *networkingv1.In
 
 	if err := r.writeSecret(ctx, key, secret, keypair); err != nil {
 		attempt := r.failed(key)
+		r.Metrics.SetCertificateRenewalFailures(key.Namespace, key.Name, attempt)
 		r.Recorder.Eventf(ing, corev1.EventTypeWarning, reasonIssueFailed,
 			"Storing the certificate for %s failed on attempt %d: %v", hostList(hosts), attempt, err)
 		return 0, err
@@ -207,6 +231,8 @@ func (r *CertificateReconciler) ensure(ctx context.Context, ing *networkingv1.In
 
 	r.forget(key)
 	stored := r.policy().Evaluate(&certs.Material{CertPEM: keypair.CertPEM, KeyPEM: keypair.KeyPEM}, hosts, r.now())
+	r.Metrics.SetCertificateRenewalFailures(key.Namespace, key.Name, 0)
+	r.Metrics.SetCertificateExpiry(key.Namespace, key.Name, hosts, stored.NotAfter)
 	log.Info("stored a certificate", "notAfter", stored.NotAfter)
 	r.Recorder.Eventf(ing, corev1.EventTypeNormal, reasonIssued,
 		"Issued a certificate for %s into Secret %s, valid until %s",
@@ -312,17 +338,52 @@ func (r *CertificateReconciler) forget(key types.NamespacedName) {
 	delete(r.attempts, key)
 }
 
-// forgetNamespace drops the counters of an Ingress that is gone. The Secret
-// names are no longer known, so everything in the namespace is cleared; the
-// count is a reporting aid, not state anything depends on.
-func (r *CertificateReconciler) forgetNamespace(namespace, _ string) {
+// taking records which Secrets an Ingress names now, and drops what was
+// reported about the ones it has stopped naming.
+func (r *CertificateReconciler) taking(ing types.NamespacedName, secrets []types.NamespacedName) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	for key := range r.attempts {
-		if key.Namespace == namespace {
-			delete(r.attempts, key)
+	previous := r.published[ing]
+	if r.published == nil {
+		r.published = map[types.NamespacedName][]types.NamespacedName{}
+	}
+	r.published[ing] = secrets
+	r.mu.Unlock()
+
+	for _, was := range previous {
+		if !slices.Contains(secrets, was) {
+			r.forget(was)
+			r.Metrics.ForgetCertificate(was.Namespace, was.Name)
 		}
 	}
+}
+
+// forgetIngress drops everything held about an Ingress that is gone, or that
+// has stopped being ours.
+//
+// What it named is remembered rather than derived, because by the time this
+// runs the Ingress cannot be read to find out which Secrets it used to name.
+func (r *CertificateReconciler) forgetIngress(ing types.NamespacedName) {
+	r.mu.Lock()
+	secrets := r.published[ing]
+	delete(r.published, ing)
+	r.mu.Unlock()
+
+	for _, key := range secrets {
+		r.forget(key)
+		r.Metrics.ForgetCertificate(key.Namespace, key.Name)
+	}
+}
+
+// secretsOf names the Secrets an Ingress asks to have filled.
+func secretsOf(ing *networkingv1.Ingress) []types.NamespacedName {
+	var out []types.NamespacedName
+	for _, block := range ing.Spec.TLS {
+		if block.SecretName == "" {
+			continue
+		}
+		out = append(out, types.NamespacedName{Namespace: ing.Namespace, Name: block.SecretName})
+	}
+	return out
 }
 
 // materialOf reads the PEM out of a Secret, in the neutral form the renewal

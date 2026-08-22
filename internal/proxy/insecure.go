@@ -24,6 +24,12 @@ type ChallengeSolver interface {
 	KeyAuthorization(ctx context.Context, host, token string) (string, bool)
 }
 
+// HostSet reports whether gated has any route for a host. TableStore is one
+// (see its HasHost), and the plain listener only ever asks the question.
+type HostSet interface {
+	HasHost(host string) bool
+}
+
 // InsecureHandler serves the plain HTTP listener.
 //
 // It has exactly two jobs: answer ACME challenges, and send everything else to
@@ -33,6 +39,10 @@ type InsecureHandler struct {
 	// Solver answers HTTP-01 challenges. Until certificate issuance is
 	// wired up there is none, and challenges are simply not found.
 	Solver ChallengeSolver
+	// Hosts bounds which names are worth redirecting: a name gated has no
+	// route for is answered 404 here rather than sent to HTTPS to be
+	// answered 404 there. A nil Hosts redirects every name.
+	Hosts HostSet
 	// Log receives the reasons requests failed. The zero Logger discards.
 	Log logr.Logger
 }
@@ -46,6 +56,14 @@ func (h *InsecureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if token, ok := strings.CutPrefix(r.URL.Path, ChallengePath); ok {
 		h.serveChallenge(w, r, host, token)
+		return
+	}
+
+	// Answering the challenge above does not depend on the routing table,
+	// and must not: a certificate is ordered before anything it protects
+	// is being served (ADR 0015). Redirecting does depend on it.
+	if h.Hosts != nil && !h.Hosts.HasHost(host) {
+		http.NotFound(w, r)
 		return
 	}
 

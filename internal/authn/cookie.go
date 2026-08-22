@@ -17,16 +17,20 @@ import (
 // that set it and to nothing else, which is the whole point of collecting the
 // login on one host and handing the result to another (ADR 0003): the parent
 // domain is exactly the scope that decision refused.
+//
+// The names themselves live beside the forwarding step (ADR 0013), which has
+// to remove them, so that adding one here cannot leave one being passed on to
+// an application.
 const (
 	// SessionCookieName holds the signed session on a protected host.
-	SessionCookieName = "__gated_session"
+	SessionCookieName = proxy.SessionCookieName
 	// LoginCookieName holds the nonce that ties a login in progress to the
 	// browser that started it. It is set on the protected host and sent
 	// only to that host's callback.
-	LoginCookieName = "__gated_login"
+	LoginCookieName = proxy.LoginCookieName
 	// StateCookieName holds the nonce behind the OAuth state parameter. It
 	// is set on the central authentication host.
-	StateCookieName = "__gated_state"
+	StateCookieName = proxy.StateCookieName
 )
 
 // ReservedPrefix is the path prefix gated answers on for its own sake

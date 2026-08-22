@@ -13,6 +13,7 @@ import (
 
 	"github.com/yuanying/gated/internal/acme/http01"
 	"github.com/yuanying/gated/internal/config"
+	"github.com/yuanying/gated/internal/proxy"
 )
 
 // The tests in this file are about one line of ADR 0006: every replica
@@ -109,7 +110,11 @@ func dataPlaneSetups() map[string]setup {
 				Client:    mgr.GetClient(),
 				Namespace: cfg.ChallengeSecretNamespace,
 			}
-			return setupDataPlane(mgr, cfg, challenges, logr.Discard())
+			// No metrics: registering the same collectors
+			// with the process-wide registry twice would
+			// panic, and what is under test is which
+			// runnables were added.
+			return setupDataPlane(mgr, cfg, challenges, &proxy.AccessLog{}, logr.Discard())
 		},
 	}
 }
@@ -124,16 +129,24 @@ func leaderOnlySetups() map[string]setup {
 				Client:    mgr.GetClient(),
 				Namespace: cfg.ChallengeSecretNamespace,
 			}
-			return setupCertificates(mgr, cfg, challenges, logr.Discard())
+			return setupCertificates(mgr, cfg, challenges, nil, logr.Discard())
 		},
 		"setupAuthorizationStatus": func(mgr ctrl.Manager) error {
-			return setupAuthorizationStatus(mgr, logr.Discard())
+			return setupAuthorizationStatus(mgr, nil, logr.Discard())
 		},
 		"setupSessionKey": func(mgr ctrl.Manager) error {
 			return setupSessionKey(mgr, testConfig(), logr.Discard())
 		},
 		"setupAccessTokens": func(mgr ctrl.Manager) error {
 			return setupAccessTokens(mgr, logr.Discard())
+		},
+		"setupIngressStatus": func(mgr ctrl.Manager) error {
+			cfg := testConfig()
+			// Without something to publish there is nothing to
+			// register, and the check below would have nothing to
+			// look at.
+			cfg.Publish.Services = config.ServiceRefs{{Namespace: "gated-system", Name: "gated-v4"}}
+			return setupIngressStatus(mgr, cfg, logr.Discard())
 		},
 	}
 }

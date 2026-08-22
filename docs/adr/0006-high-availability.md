@@ -1,6 +1,7 @@
 # 0006. 高可用構成とリーダー選出
 
 - Date: 2026-08-21
+- Updated: 2026-08-22（Ingress の `status.loadBalancer` 書き戻しを分担表に足した。ADR 0032）
 - Status: Accepted
 
 ## Context
@@ -19,6 +20,9 @@
 | HTTP のルーティングとプロキシ | 全レプリカ |
 | 認証・認可の判定 | 全レプリカ |
 | ACME による証明書の取得・更新 | リーダーのみ |
+| Ingress の `status.loadBalancer` 書き戻し | リーダーのみ |
+
+書き戻しをリーダーに限るのは、証明書とは理由が違う。全レプリカが書いても結果は同じであり、壊れるものは無い。ただし同じ内容の更新が API サーバへレプリカの数だけ飛ぶ。読む側が得るものが何も無い書き込みなので、1つに寄せる（ADR 0032）。
 
 リーダーの選出には Kubernetes の Lease を使う。controller-runtime のリーダー選出機構をそのまま利用する。
 
@@ -60,3 +64,4 @@ Lease による排他は「同時に2つのリーダーが存在しない」こ�
 - [[0001-self-built-ingress-controller]] — コントローラとプロキシの同居
 - [[0003-authentication-and-session]] — 署名鍵の共有で成立するステートレスセッション
 - [[0005-certificate-issuance]] — リーダーが担う証明書発行
+- [[0032-ingress-load-balancer-status]] — リーダーが書き戻す Ingress の外部アドレス
