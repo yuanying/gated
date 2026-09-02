@@ -63,4 +63,4 @@
 
 - [[0011-generated-artifacts-and-tooling]] — コミットした生成物が再現できることを守る、同じ形の検査
 - [[0026-continuous-integration]] — この検査を足す先の CI
-- [[0027-dependency-updates]] — 依存を上げる側。Renovate の PR もこの検査を通る
+- [[0027-dependency-updates]] — 依存を上げる側。Renovate の PR もこの検査を通る。ここで数えた「PR に `tidy` の結果を載せる一手間」は、0027 が Renovate 自身に `tidy` を回させることにした時点で人の手を離れた
