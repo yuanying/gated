@@ -6,6 +6,7 @@
   ],
   "timezone": "Asia/Tokyo",
   "dependencyDashboard": true,
+  "postUpdateOptions": ["gomodTidy"],
   "kubernetes": {
     "description": "The kubernetes manager matches no files until it is told which ones, and this repository keeps its manifests in two places",
     "managerFilePatterns": [
