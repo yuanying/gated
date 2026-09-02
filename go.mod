@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/go-logr/logr v1.4.4
 	github.com/prometheus/client_golang v1.23.2
-	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/client_model v0.6.3
 	golang.org/x/crypto v0.55.0
 	k8s.io/api v0.36.4
 	k8s.io/apiextensions-apiserver v0.36.0
