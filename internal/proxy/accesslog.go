@@ -42,6 +42,9 @@ type AccessLog struct {
 type observation struct {
 	ingress routing.ResourceRef
 	subject string
+	// upstream is the endpoint the request was forwarded to, set by the
+	// proxy itself once it has chosen one (ADR 0033).
+	upstream string
 }
 
 var observationKey = &contextKey{"access-log-observation"}
@@ -94,6 +97,7 @@ func (a *AccessLog) Wrap(next http.Handler) http.Handler {
 			"ingress", seen.ingress,
 			"proto", protocolOf(r, recorder.hijacked),
 			"upstreamError", upstreamError,
+			"upstream", seen.upstream,
 		)
 	})
 }

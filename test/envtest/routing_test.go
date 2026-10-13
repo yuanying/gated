@@ -4,6 +4,7 @@ package envtest_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -31,10 +33,10 @@ const ingressClass = "gated"
 
 // dialRecorder dials one fixed address and remembers what it was asked for.
 //
-// The routing table, the Service lookup and the proxy are all the real thing
-// here; only the last hop is redirected, because a cluster IP allocated by the
-// API server points at a network that does not exist in a test. What the
-// resolver produced is asserted on instead of being thrown away.
+// The routing table, the Service and EndpointSlice lookup and the proxy are all
+// the real thing here; only the last hop is redirected, because an endpoint
+// address published for a test points at a network that does not exist. What
+// the resolver produced is asserted on instead of being thrown away.
 type dialRecorder struct {
 	to string
 
@@ -47,6 +49,13 @@ func (d *dialRecorder) DialContext(ctx context.Context, network, addr string) (n
 	d.wanted = append(d.wanted, addr)
 	d.mu.Unlock()
 	return (&net.Dialer{}).DialContext(ctx, network, d.to)
+}
+
+// dialled returns every address asked for so far, in order.
+func (d *dialRecorder) dialled() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.wanted...)
 }
 
 func (d *dialRecorder) lastAddress() string {
@@ -120,9 +129,22 @@ func newBackend(t *testing.T, body string) string {
 	return u.Host
 }
 
-// newService creates a Service and returns the cluster IP the API server
-// allocated for it.
+// newService creates a Service with one ready endpoint behind it, and returns
+// the address that endpoint is dialled at.
+//
+// envtest runs no controller-manager, so nothing would publish the
+// EndpointSlice a real cluster would; the test does it in its place. Without
+// one, every request to the Service is answered 503 (ADR 0033).
 func newService(t *testing.T, ns, name string, port int32, portName string) string {
+	t.Helper()
+
+	createService(t, ns, name, port, portName)
+	newEndpointSlice(t, ns, name, name+"-ready", portName, 8080, readyAt(endpointIP(1)))
+	return net.JoinHostPort(endpointIP(1), "8080")
+}
+
+// createService creates a Service and nothing behind it.
+func createService(t *testing.T, ns, name string, port int32, portName string) {
 	t.Helper()
 
 	svc := &corev1.Service{
@@ -143,7 +165,53 @@ func newService(t *testing.T, ns, name string, port int32, portName string) stri
 	if svc.Spec.ClusterIP == "" {
 		t.Fatalf("the API server allocated no cluster IP for %s/%s", ns, name)
 	}
-	return svc.Spec.ClusterIP
+}
+
+// endpointIP is an address in a range that is never routed anywhere, so that
+// only the dial recorder could ever reach it.
+func endpointIP(n int) string {
+	return fmt.Sprintf("192.0.2.%d", n)
+}
+
+// readyAt and unreadyAt describe one Pod as the EndpointSlice controller would.
+func readyAt(ip string) discoveryv1.Endpoint {
+	return discoveryv1.Endpoint{
+		Addresses:  []string{ip},
+		Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true), Serving: ptr.To(true), Terminating: ptr.To(false)},
+	}
+}
+
+func unreadyAt(ip string) discoveryv1.Endpoint {
+	return discoveryv1.Endpoint{
+		Addresses:  []string{ip},
+		Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(false), Serving: ptr.To(false), Terminating: ptr.To(false)},
+	}
+}
+
+// newEndpointSlice publishes the Pods behind a Service, as the EndpointSlice
+// controller would: under the Service port's name, at the target port the
+// Pods resolved it to.
+func newEndpointSlice(t *testing.T, ns, service, name, portName string, port int32, endpoints ...discoveryv1.Endpoint) *discoveryv1.EndpointSlice {
+	t.Helper()
+
+	es := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      name,
+			Labels:    map[string]string{discoveryv1.LabelServiceName: service},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports: []discoveryv1.EndpointPort{{
+			Name:     ptr.To(portName),
+			Port:     ptr.To(port),
+			Protocol: ptr.To(corev1.ProtocolTCP),
+		}},
+		Endpoints: endpoints,
+	}
+	if err := k8sClient.Create(context.Background(), es); err != nil {
+		t.Fatalf("creating the EndpointSlice: %v", err)
+	}
+	return es
 }
 
 // newIngress builds an Ingress routing one host and path to one Service port.
@@ -181,7 +249,7 @@ func TestIngressChangesReachTheProxy(t *testing.T) {
 	tables, resolver := startRoutingController(t)
 
 	backendAddr := newBackend(t, "from the backend")
-	clusterIP := newService(t, ns, "web", 80, "http")
+	endpointAddr := newService(t, ns, "web", 80, "http")
 
 	dialer := &dialRecorder{to: backendAddr}
 	front := httptest.NewServer(&proxy.Handler{
@@ -229,9 +297,10 @@ func TestIngressChangesReachTheProxy(t *testing.T) {
 	if string(body) != "from the backend" {
 		t.Errorf("body = %q, want %q", body, "from the backend")
 	}
-	// The Service and its port were resolved for real: the proxy asked to
-	// dial the cluster IP the API server handed out.
-	if got, want := dialer.lastAddress(), net.JoinHostPort(clusterIP, "80"); got != want {
+	// The Service, its port and its EndpointSlice were resolved for real:
+	// the proxy asked to dial the ready endpoint at its target port, not the
+	// cluster IP (ADR 0033).
+	if got, want := dialer.lastAddress(), endpointAddr; got != want {
 		t.Errorf("dialled %q, want %q", got, want)
 	}
 	if got := resp.Header.Get("X-Echo-Host"); got != "app.example.com" {

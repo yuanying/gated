@@ -60,12 +60,20 @@ func (s *TableStore) HasHost(host string) bool {
 
 // BackendResolver turns a routed backend into an address to dial.
 //
-// gated forwards to the Service's cluster IP and lets kube-proxy pick an
-// endpoint (ADR 0001): reproducing endpoint selection here would mean tracking
-// EndpointSlices, readiness and topology for no gain.
+// It is asked once per request and answers with one ready endpoint of the
+// Service, not with its cluster IP (ADR 0033). A connection to a cluster IP is
+// pinned to whichever Pod kube-proxy chose when it was opened, and a pooled one
+// goes on being used after that Pod stops being ready. Dialling the endpoint
+// itself keys the pool by Pod, so a Pod that is no longer chosen has its
+// connections left alone too.
 type BackendResolver interface {
 	Resolve(ctx context.Context, backend routing.Backend) (string, error)
 }
+
+// ErrNoReadyEndpoints is what a BackendResolver wraps when the Service is there
+// but nothing behind it can take a request. It is answered with 503 rather
+// than 502: nothing was forwarded, and it may well pass (ADR 0033).
+var ErrNoReadyEndpoints = errors.New("no ready endpoint")
 
 // Handler routes a request and forwards it.
 type Handler struct {
@@ -177,12 +185,22 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	addr, err := h.Backends.Resolve(r.Context(), match.Backend)
+	if errors.Is(err, ErrNoReadyEndpoints) {
+		h.Log.Error(err, "no endpoint is ready to take the request",
+			"host", r.Host, "path", r.URL.Path,
+			"namespace", match.Backend.Namespace, "service", match.Backend.Service)
+		http.Error(w, "the service behind this name has nothing ready to answer", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		h.Log.Error(err, "resolving the backend",
 			"host", r.Host, "path", r.URL.Path,
 			"namespace", match.Backend.Namespace, "service", match.Backend.Service)
 		http.Error(w, "the service behind this name cannot be resolved", http.StatusBadGateway)
 		return
+	}
+	if seen, ok := r.Context().Value(observationKey).(*observation); ok {
+		seen.upstream = addr
 	}
 
 	target := &url.URL{Scheme: "http", Host: addr}

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -256,6 +257,72 @@ gated_upstream_errors_total{ingress_name="",ingress_namespace=""} 1
 `
 	if err := testutil.GatherAndCompare(registry, strings.NewReader(want), "gated_upstream_errors_total"); err != nil {
 		t.Error(err)
+	}
+}
+
+// The line names the endpoint a request was forwarded to, so that a Pod
+// answering badly can be found from gated's side (ADR 0033). A request that was
+// never forwarded names none.
+func TestAccessLogRecordsTheEndpointForwardedTo(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "hello")
+	}))
+	defer backend.Close()
+	addr := strings.TrimPrefix(backend.URL, "http://")
+
+	tables := &TableStore{}
+	tables.Store(routing.BuildTable([]routing.Ingress{{
+		Namespace: "apps",
+		Name:      "app",
+		Rules: []routing.HostRule{{
+			Host: "app.example.com",
+			Paths: []routing.PathRule{{
+				Path:     "/",
+				PathType: routing.PathTypePrefix,
+				Backend:  routing.Backend{Namespace: "apps", Service: "web", PortNumber: 80},
+			}},
+		}},
+	}}))
+	handler, sink, _ := newAccessLog(&Handler{
+		Tables: tables,
+		Backends: backendFunc(func(context.Context, routing.Backend) (string, error) {
+			return addr, nil
+		}),
+		Middleware: Observe,
+	})
+
+	sendGet(t, handler, "/", func(r *http.Request) { r.Host = "app.example.com" })
+	if got := sink.only(t); got.values["upstream"] != addr {
+		t.Errorf("line[upstream] = %v, want %q", got.values["upstream"], addr)
+	}
+
+	handler, sink, _ = newAccessLog(&Handler{Tables: tables})
+	sendGet(t, handler, "/", func(r *http.Request) { r.Host = "nothing.example.com" })
+	if got := sink.only(t); got.values["upstream"] != "" {
+		t.Errorf("line[upstream] = %v for a request nothing routed, want empty", got.values["upstream"])
+	}
+}
+
+// backendFunc adapts a function to the BackendResolver interface.
+type backendFunc func(context.Context, routing.Backend) (string, error)
+
+func (f backendFunc) Resolve(ctx context.Context, b routing.Backend) (string, error) {
+	return f(ctx, b)
+}
+
+// A 503 for a Service with nobody ready behind it is not an upstream error:
+// nothing was forwarded (ADR 0031, ADR 0033).
+func TestAccessLogCountsNoUpstreamErrorForUnavailable(t *testing.T) {
+	handler, sink, registry := newAccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nobody is ready", http.StatusServiceUnavailable)
+	}))
+	sendGet(t, handler, "/", nil)
+
+	if got := sink.only(t); got.values["upstreamError"] != false {
+		t.Errorf("line[upstreamError] = %v, want false", got.values["upstreamError"])
+	}
+	if got := testutil.CollectAndCount(registry, "gated_upstream_errors_total"); got != 0 {
+		t.Errorf("gated_upstream_errors_total has %d series, want none", got)
 	}
 }
 
