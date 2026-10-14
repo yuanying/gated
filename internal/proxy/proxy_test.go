@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -243,6 +244,31 @@ func TestProxyReturnsBadGatewayWhenTheBackendCannotBeResolved(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+}
+
+// A Service that is there but has nobody ready behind it is told apart from
+// one that cannot be reached: nothing was forwarded, and waiting may fix it
+// (ADR 0033).
+func TestProxyReturnsServiceUnavailableWhenNoEndpointIsReady(t *testing.T) {
+	front := httptest.NewServer(&proxy.Handler{
+		Tables: tableFor("app.example.com"),
+		Backends: resolverFunc(func(context.Context, routing.Backend) (string, error) {
+			return "", fmt.Errorf("Service apps/web: %w", proxy.ErrNoReadyEndpoints)
+		}),
+	})
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/", nil)
+	req.Host = "app.example.com"
+	resp, err := front.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do() = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
 	}
 }
 

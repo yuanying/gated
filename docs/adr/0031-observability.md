@@ -1,6 +1,7 @@
 # 0031. 可観測性: アクセスログとメトリクス
 
 - Date: 2026-08-22
+- Updated: 2026-10-13（アクセスログに転送先の endpoint を足した。ADR 0033）
 - Status: Accepted
 
 ## Context
@@ -46,6 +47,7 @@ ADR 0002 が受け入れた fail-open の穴も同じ形をしている。`targe
 | Ingress | ルーティングが選んだ Ingress の namespace と name |
 | プロトコル | `HTTP/1.1` / `HTTP/2.0`、Upgrade が成立していれば `ws` |
 | 上流エラー | 502 で終わったか |
+| 転送先 | 選んだ endpoint の Pod IP と port。転送する前に終わったリクエストでは空（ADR 0033） |
 
 書かないものを決めておく。
 
@@ -118,6 +120,8 @@ gauge は放っておくと「最後に見た値」を出し続ける。証明�
 届いた先が失敗したのか」だが、エッジから見ればどちらも「このルートが 502 を返している」で
 あり、alert として鳴らしたい条件は同じである。区別が要る場面が出るまでは足さない。
 
+ready な endpoint が無くて返す 503（ADR 0033）は数えない。転送していないので上流のエラーではない。`gated_http_requests_total` の `code` で数えられる。
+
 ## Consequences
 
 入口を通った1リクエストごとに 1 行が出る。ログの量はトラフィックに比例する。切る手段は
@@ -147,3 +151,4 @@ fail-open の穴（ADR 0002）が alert にできるようになる。`NetworkRo
 - [[0009-startup-configuration]] — 既定値を持ってよい値の区分
 - [[0013-data-plane]] — クライアントの申告する転送ヘッダを信じない決定
 - [[0014-certificate-renewal-and-failure]] — 更新の失敗を静かに済ませる決定
+- [[0033-forwarding-to-ready-endpoints]] — 転送先の endpoint の選び方と 503

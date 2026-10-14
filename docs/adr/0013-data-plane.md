@@ -3,6 +3,7 @@
 - Date: 2026-08-21
 - Updated: 2026-08-22（SSL リダイレクトの無効化に「対象が無い」と書いていた理由を、実態に合わせて直した。決定は変えていない）
 - Updated: 2026-08-22（転送時に gated 自身の Cookie を落とし、`X-Real-IP` を足し、専用の Transport を使うことにした）
+- Updated: 2026-10-13（cluster IP へ転送する決定を ADR 0033 で置き換えた。ready な endpoint が無い場合を 503 に分けた）
 - Status: Accepted
 
 ## Context
@@ -15,11 +16,9 @@ ADR 0001 はコントローラとリバースプロキシを単一プロセス�
 
 ## Decision
 
-### バックエンドは Service の cluster IP へ転送する
+### バックエンドは ready な endpoint へ転送する
 
-Ingress のバックエンドは Service と port である。それを Service の cluster IP と port 番号に解決し、そこへ転送する。EndpointSlice は見ない。
-
-kube-proxy が既に ready な endpoint へ分散している。同じことをここでやり直すには、EndpointSlice の追跡と readiness とトポロジの扱いが要り、辿り着く答えは同じである。headless Service と ExternalName Service は転送先が無いので設定の誤りとして扱う。
+この節は ADR 0033 で置き換えた。当初は Service の cluster IP へ転送し、endpoint の選択を kube-proxy に任せていた。keep-alive の接続が張った時点の Pod に固定され、その Pod が UnReady になっても使われ続けると分かったため、EndpointSlice を読んで ready な endpoint の Pod IP へ直接転送する形に改めた。headless Service と ExternalName Service を設定の誤りとして扱うことは変えていない。
 
 ### 転送ヘッダはクライアントの申告を捨てる
 
@@ -43,7 +42,7 @@ Cookie は Domain を持たないので、漏れた先で使えるのは同じ�
 
 標準ライブラリの既定の Transport をそのまま使わず、gated 用に1つ作る。違いは2つある。
 
-環境変数のプロキシ設定を読まない。既定の Transport は `HTTP_PROXY` / `HTTPS_PROXY` を見るので、Pod にその変数が紛れ込むと、クラスター内のバックエンドへの通信が丸ごと外へ向かう。gated が話す相手は Service の cluster IP だけであり、その途中にプロキシが立つ構成は存在しない。
+環境変数のプロキシ設定を読まない。既定の Transport は `HTTP_PROXY` / `HTTPS_PROXY` を見るので、Pod にその変数が紛れ込むと、クラスター内のバックエンドへの通信が丸ごと外へ向かう。gated が話す相手はクラスター内の Pod だけであり（ADR 0033）、その途中にプロキシが立つ構成は存在しない。
 
 アイドル接続をバックエンドごとに複数保つ。既定は1ホストあたり2本で、同時アクセスがそれを越えるとリクエストごとに TCP を張り直す。転送のたびに握手とその後の TIME_WAIT がバックエンド側に積まれるので、プールを広げる。値は ADR 0030 に置く。
 
@@ -60,6 +59,8 @@ Cookie は Domain を持たないので、漏れた先で使えるのは同じ�
 ### 一致しなければ 404、届かなければ 502
 
 どの経路にも一致しないリクエストは 404 とする。最初のスナップショットが入る前も同じく 404 である。バックエンドを解決できない、あるいは応答しない場合は 502 とする。設定が無いことと、設定はあるが相手が居ないことを、応答の上で区別する。
+
+ただし、Service はあるが ready な endpoint が1つも無い場合は 503 とする（ADR 0033）。転送する前に「今は誰も受けられない」と分かる場合であり、転送して失敗した場合と分ける。
 
 ### 80 番はバックエンドへ転送しない
 
@@ -91,7 +92,7 @@ TLS のリスナは `h2` と `http/1.1` を広告する。アップグレード�
 
 ## Consequences
 
-バックエンドの選択を kube-proxy に委ねたことで、EndpointSlice の watch もヘルスチェックも持たずに済む。代償として、gated から見えるのは「Service が居るかどうか」までで、その先の endpoint が全滅していれば 502 が返るだけになる。どの Pod が落ちているかは gated のログには出ない。
+バックエンドの選択を kube-proxy に委ねたことで、EndpointSlice の watch もヘルスチェックも持たずに済む、と当初は考えた。この判断は ADR 0033 で改め、EndpointSlice を watch するようになった。ヘルスチェックは今も持たず、Pod の readiness に従う。
 
 転送ヘッダを信用しない方針は、gated の前段にロードバランサが居てそれが `X-Forwarded-For` を付けている場合、クライアントの本来のアドレスが失われることを意味する。前段を信用する設定は今回持たない。必要になった時点で、信用するアドレス範囲を明示させる形で足す。
 
@@ -112,3 +113,4 @@ gated 自身の Cookie を落とすことで、`Cookie` ヘッダは素通しで
 - [[0022-presenting-and-checking-a-token]] — Secret を読まずにトークンを照合する方法
 - [[0004-access-token-for-non-browser-clients]] — 照合できた資格情報を削ってから転送するという先例
 - [[0030-data-plane-self-defence]] — 期限と接続プールの値、および守らないもの
+- [[0033-forwarding-to-ready-endpoints]] — cluster IP への転送を置き換えた決定

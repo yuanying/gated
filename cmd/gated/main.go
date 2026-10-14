@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -219,10 +220,11 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		return fmt.Errorf("registering the authorisation readiness check: %w", err)
 	}
 
-	// Services and certificates are read while a request is being served,
-	// not from a reconciler, so nothing else would start their informers.
-	// Without this the first request of each kind waits for a full list.
-	if err := mgr.Add(warmUpCache(mgr, &corev1.Service{}, &corev1.Secret{})); err != nil {
+	// Services, their EndpointSlices and certificates are read while a
+	// request is being served, not from a reconciler, so nothing else would
+	// start their informers. Without this the first request of each kind
+	// waits for a full list.
+	if err := mgr.Add(warmUpCache(mgr, &corev1.Service{}, &discoveryv1.EndpointSlice{}, &corev1.Secret{})); err != nil {
 		return fmt.Errorf("registering the data plane caches: %w", err)
 	}
 

@@ -25,10 +25,12 @@ package controller
 //
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses/status,verbs=get;update;patch
 
-// The proxy resolves a routed backend to the Service's cluster IP (ADR 0013),
-// so it reads Services and nothing else about a workload.
+// The proxy resolves a routed backend to a ready endpoint of its Service (ADR
+// 0033): the Service for the port, its EndpointSlices for the Pods behind it.
+// It reads nothing else about a workload.
 //
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
 // Secrets carry everything replicas share (ADR 0006): the certificates TLS is
 // terminated with, the ACME account key, the HTTP-01 challenge tokens, the
