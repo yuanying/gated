@@ -21,6 +21,7 @@ func validConfig() config.Config {
 	c.ACME.AccountSecret = config.SecretRef{Namespace: "gated-system", Name: "acme-account"}
 	c.Auth.Host = "auth.example.com"
 	c.Auth.SessionKeySecret = config.SecretRef{Namespace: "gated-system", Name: "session-key"}
+	c.Auth.AssertionKeySecret = config.SecretRef{Namespace: "gated-system", Name: "assertion-key"}
 	c.Auth.GitHub.ClientID = "client-id"
 	c.Auth.GitHub.ClientSecretRef = config.SecretKeyRef{Namespace: "gated-system", Name: "github-oauth", Key: "clientSecret"}
 	c.LeaderElection.Namespace = "gated-system"
@@ -134,6 +135,31 @@ func TestValidate(t *testing.T) {
 			name:    "session key secret is required",
 			mutate:  func(c *config.Config) { c.Auth.SessionKeySecret = config.SecretRef{} },
 			invalid: []string{"session-key-secret"},
+		},
+		{
+			// No default, like every other Secret gated keeps
+			// (ADR 0009). An upgrade that does not add it refuses to
+			// start and says which flag is missing (ADR 0034).
+			name:    "assertion key secret is required",
+			mutate:  func(c *config.Config) { c.Auth.AssertionKeySecret = config.SecretRef{} },
+			invalid: []string{"assertion-key-secret"},
+		},
+		{
+			// Each is created whole by whoever finds it missing, so a
+			// Secret shared between them would be written by one and
+			// found unusable by the other.
+			name: "assertion key secret is not the session key secret",
+			mutate: func(c *config.Config) {
+				c.Auth.AssertionKeySecret = c.Auth.SessionKeySecret
+			},
+			invalid: []string{"assertion-key-secret"},
+		},
+		{
+			name: "assertion key secret must be a valid name",
+			mutate: func(c *config.Config) {
+				c.Auth.AssertionKeySecret = config.SecretRef{Namespace: "gated-system", Name: "Assertion_Key"}
+			},
+			invalid: []string{"assertion-key-secret"},
 		},
 		{
 			name: "at least one identity provider must be configured",
@@ -368,6 +394,9 @@ func TestDefaultCarriesNoEnvironmentSpecificValues(t *testing.T) {
 	if !c.Auth.SessionKeySecret.IsZero() {
 		t.Errorf("Auth.SessionKeySecret default = %v, want zero", c.Auth.SessionKeySecret)
 	}
+	if !c.Auth.AssertionKeySecret.IsZero() {
+		t.Errorf("Auth.AssertionKeySecret default = %v, want zero", c.Auth.AssertionKeySecret)
+	}
 	if !c.Auth.GitHub.IsZero() || !c.Auth.Google.IsZero() {
 		t.Errorf("identity provider defaults = %v/%v, want zero", c.Auth.GitHub, c.Auth.Google)
 	}
@@ -531,6 +560,7 @@ func TestAddFlagsRoundTrip(t *testing.T) {
 		"--acme-account-secret=" + want.ACME.AccountSecret.String(),
 		"--auth-host=" + want.Auth.Host,
 		"--session-key-secret=" + want.Auth.SessionKeySecret.String(),
+		"--assertion-key-secret=" + want.Auth.AssertionKeySecret.String(),
 		"--github-client-id=" + want.Auth.GitHub.ClientID,
 		"--github-client-secret-ref=" + want.Auth.GitHub.ClientSecretRef.String(),
 		"--google-client-id=" + want.Auth.Google.ClientID,

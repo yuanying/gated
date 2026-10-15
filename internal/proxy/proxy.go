@@ -70,6 +70,26 @@ type BackendResolver interface {
 	Resolve(ctx context.Context, backend routing.Backend) (string, error)
 }
 
+// Asserter vouches for the subject of a request on its way to a backend
+// (ADR 0034).
+//
+// It is an interface because what it signs with lives in a Secret every
+// replica reads for itself, and this package knows nothing about that.
+type Asserter interface {
+	// Assert returns the value of the assertion header for a request to
+	// host made by subject.
+	Assert(ctx context.Context, subject, host string) (string, error)
+}
+
+// The header gated vouches for a subject in, and the prefix it reserves for the
+// headers it sets itself. They are spelled here rather than taken from the
+// package that signs, because what this package must never get wrong is the
+// stripping, and that needs no signer at all.
+const (
+	gatedHeaderPrefix = "gated-"
+	assertionHeader   = "Gated-Assertion"
+)
+
 // ErrNoReadyEndpoints is what a BackendResolver wraps when the Service is there
 // but nothing behind it can take a request. It is answered with 503 rather
 // than 502: nothing was forwarded, and it may well pass (ADR 0033).
@@ -85,6 +105,10 @@ type Handler struct {
 	// the one gated builds for itself (ADR 0013), which is not
 	// http.DefaultTransport.
 	Transport http.RoundTripper
+	// Assertions vouches for the subject of every request that has one. A
+	// nil Asserter vouches for nobody; the client's own Gated- headers are
+	// taken off either way.
+	Assertions Asserter
 	// BodyReadTimeout bounds one read of the client's request body, and
 	// is renewed before each read: it is the gap between two reads that is
 	// bounded, not the transfer. Zero uses the value in ADR 0030.
@@ -111,8 +135,9 @@ type Handler struct {
 type contextKey struct{ name string }
 
 var (
-	matchContextKey  = &contextKey{"routing-match"}
-	targetContextKey = &contextKey{"backend-target"}
+	matchContextKey     = &contextKey{"routing-match"}
+	targetContextKey    = &contextKey{"backend-target"}
+	assertionContextKey = &contextKey{"assertion"}
 )
 
 // RequestWithMatch records the route a request was matched to, so that the
@@ -199,12 +224,26 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the service behind this name cannot be resolved", http.StatusBadGateway)
 		return
 	}
-	if seen, ok := r.Context().Value(observationKey).(*observation); ok {
+	ctx := r.Context()
+	if subject, ok := SubjectFromContext(ctx); ok && h.Assertions != nil {
+		signed, err := h.Assertions.Assert(ctx, subject, r.Host)
+		if err != nil {
+			// Forwarding without it would tell the backend this
+			// subject is anonymous. Better that the request is
+			// refused for the moment it takes to read the key.
+			h.Log.Error(err, "could not vouch for the subject of a request", "host", r.Host)
+			http.Error(w, "this request cannot be passed on just now; try again", http.StatusServiceUnavailable)
+			return
+		}
+		ctx = context.WithValue(ctx, assertionContextKey, signed)
+	}
+
+	if seen, ok := ctx.Value(observationKey).(*observation); ok {
 		seen.upstream = addr
 	}
 
 	target := &url.URL{Scheme: "http", Host: addr}
-	h.proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), targetContextKey, target)))
+	h.proxy.ServeHTTP(w, r.WithContext(context.WithValue(ctx, targetContextKey, target)))
 }
 
 // handleUpstreamError turns a failed outbound request into a 502. A client
@@ -244,6 +283,24 @@ func rewrite(pr *httputil.ProxyRequest) {
 	pr.SetXForwarded()
 	setRealIP(pr.Out)
 	dropGatedCookies(pr.Out)
+	dropGatedHeaders(pr.Out)
+	if signed, ok := pr.In.Context().Value(assertionContextKey).(string); ok {
+		pr.Out.Header.Set(assertionHeader, signed)
+	}
+}
+
+// dropGatedHeaders takes off every header a client sent under gated's prefix,
+// so that behind gated a Gated- header is always one gated wrote (ADR 0034).
+//
+// The whole prefix goes rather than a list of names. A header gated starts to
+// set later is then protected from the day it is added, instead of from the day
+// somebody remembers to add it to the list.
+func dropGatedHeaders(out *http.Request) {
+	for name := range out.Header {
+		if len(name) >= len(gatedHeaderPrefix) && strings.EqualFold(name[:len(gatedHeaderPrefix)], gatedHeaderPrefix) {
+			delete(out.Header, name)
+		}
+	}
 }
 
 // setRealIP states the one address gated observed, under the name

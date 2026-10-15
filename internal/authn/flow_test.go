@@ -694,3 +694,51 @@ func readAll(t *testing.T, resp *http.Response) string {
 	}
 	return string(body)
 }
+
+// The public keys are answered by the central authentication host, where the
+// login is: ahead of routing, so that no Ingress mistake can take them away,
+// and nowhere else (ADR 0034).
+func TestTheCentralHostPublishesTheKeySet(t *testing.T) {
+	w := newWorld(t)
+	w.auth.JWKS = http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.Header().Set("Cache-Control", "public, max-age=300")
+		io.WriteString(rw, `{"keys":[]}`)
+	})
+	forwarded := false
+	router := &Router{
+		AuthHost: authHost,
+		Central:  w.auth,
+		Callback: w.protected,
+		Next: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			forwarded = true
+		}),
+	}
+
+	resp := get(router, authHost, JWKSPath)
+	if forwarded {
+		t.Fatal("the key set was routed to an application")
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != `{"keys":[]}` {
+		t.Errorf("answered %d %q, want the key set", resp.StatusCode, body)
+	}
+	// Everything else the login answers is about one visitor; this is the
+	// same for everybody and is meant to be held.
+	if got := resp.Header.Get("Cache-Control"); got != "public, max-age=300" {
+		t.Errorf("Cache-Control = %q, want what the key set said", got)
+	}
+
+	forwarded = false
+	get(router, shopHost, JWKSPath)
+	if !forwarded {
+		t.Error("the key set path was claimed on a protected host; only the central host reserves more than the callback")
+	}
+}
+
+func TestNoKeySetIsAnsweredWithoutOne(t *testing.T) {
+	w := newWorld(t)
+	resp := get(w.auth, authHost, JWKSPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("answered %d, want 404", resp.StatusCode)
+	}
+}

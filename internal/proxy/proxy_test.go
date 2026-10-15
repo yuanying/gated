@@ -578,3 +578,140 @@ func TestProxySetsXRealIP(t *testing.T) {
 		t.Errorf("X-Real-IP = %q, want the client-supplied value discarded", got.Get("X-Real-IP"))
 	}
 }
+
+// fakeAsserter vouches for whoever it is asked about, in a form a test can
+// read back.
+type fakeAsserter struct {
+	err   error
+	calls int
+}
+
+func (f *fakeAsserter) Assert(_ context.Context, subject, host string) (string, error) {
+	f.calls++
+	if f.err != nil {
+		return "", f.err
+	}
+	return "signed:" + subject + "@" + host, nil
+}
+
+// asserting starts a backend that records the headers it was sent, behind a
+// proxy whose callers are who subject says, and returns a function that makes
+// one request and reports what arrived. Nothing is protected, so every caller
+// is let through, named or not.
+func asserting(t *testing.T, subject string, asserter proxy.Asserter) func(set func(*http.Request)) (*http.Response, http.Header) {
+	t.Helper()
+	var got http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	t.Cleanup(backend.Close)
+
+	decision := &proxy.Authorization{
+		Policies: policiesFor(t, nil, nil),
+		Subjects: staticSubject(subject),
+		AuthHost: "auth.example.com",
+	}
+	front := httptest.NewServer(&proxy.Handler{
+		Tables:     tableFor("app.example.com"),
+		Backends:   toAddress(addressOf(t, backend)),
+		Assertions: asserter,
+		Middleware: decision.Wrap,
+	})
+	t.Cleanup(front.Close)
+
+	return func(set func(*http.Request)) (*http.Response, http.Header) {
+		t.Helper()
+		got = nil
+		req, _ := http.NewRequest(http.MethodGet, front.URL+"/", nil)
+		req.Host = "App.Example.com"
+		set(req)
+		resp, err := front.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do() = %v", err)
+		}
+		resp.Body.Close()
+		return resp, got
+	}
+}
+
+func TestProxyTakesOffWhatAClientSentUnderGatedsPrefix(t *testing.T) {
+	// Behind gated, a Gated- header is one gated wrote. Whatever a client
+	// sends under that prefix comes off every request, whether or not
+	// anybody is logged in, so that a backend whose check is lax still
+	// never reads a claim the client made (ADR 0034).
+	for name, subject := range map[string]string{"anonymous": "", "logged in": "github:octocat"} {
+		t.Run(name, func(t *testing.T) {
+			send := asserting(t, subject, &fakeAsserter{})
+			_, got := send(func(r *http.Request) {
+				r.Header.Set("Gated-Assertion", "forged")
+				r.Header.Set("Gated-Subject", "github:admin")
+				// Spelled however the client likes; header names
+				// are not case-sensitive.
+				r.Header["gated-something-later"] = []string{"forged"}
+				r.Header.Set("X-Gated-Kept", "kept")
+				r.Header.Set("Gatedness", "kept")
+			})
+			if got == nil {
+				t.Fatal("the backend was never reached")
+			}
+			for name, values := range got {
+				if strings.HasPrefix(strings.ToLower(name), "gated-") && name != "Gated-Assertion" {
+					t.Errorf("the backend saw %s: %v", name, values)
+				}
+			}
+			if v := got.Get("Gated-Assertion"); v == "forged" {
+				t.Error("the client's own Gated-Assertion reached the backend")
+			}
+			for _, kept := range []string{"X-Gated-Kept", "Gatedness"} {
+				if got.Get(kept) != "kept" {
+					t.Errorf("%s = %q, want it passed through: it is not under the prefix", kept, got.Get(kept))
+				}
+			}
+		})
+	}
+}
+
+func TestProxyVouchesForWhoeverWasAuthenticated(t *testing.T) {
+	asserter := &fakeAsserter{}
+	send := asserting(t, "github:octocat", asserter)
+	_, got := send(func(*http.Request) {})
+
+	// The host is the one the request named; the signer makes it
+	// canonical.
+	if v := got.Get("Gated-Assertion"); v != "signed:github:octocat@App.Example.com" {
+		t.Errorf("Gated-Assertion = %q, want gated's own for github:octocat at the requested host", v)
+	}
+	if len(got.Values("Gated-Assertion")) != 1 {
+		t.Errorf("the backend saw %d Gated-Assertion headers, want 1", len(got.Values("Gated-Assertion")))
+	}
+}
+
+func TestProxyVouchesForNobodyAnonymous(t *testing.T) {
+	// Somebody let through without logging in has nobody to vouch for. A
+	// backend that wants a subject refuses them, which is what makes a
+	// fail-open Ingress harmless to it (ADR 0034).
+	asserter := &fakeAsserter{}
+	send := asserting(t, "", asserter)
+	_, got := send(func(*http.Request) {})
+
+	if v := got.Values("Gated-Assertion"); len(v) != 0 {
+		t.Errorf("an anonymous request carried Gated-Assertion %v", v)
+	}
+	if asserter.calls != 0 {
+		t.Errorf("the signer was asked %d times about nobody", asserter.calls)
+	}
+}
+
+func TestProxyForwardsNothingItCannotVouchFor(t *testing.T) {
+	// A logged-in request forwarded without its assertion reads to the
+	// backend as anonymous. That is not something to do quietly.
+	send := asserting(t, "github:octocat", &fakeAsserter{err: errors.New("no key yet")})
+	resp, got := send(func(*http.Request) {})
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("answered %d, want 503", resp.StatusCode)
+	}
+	if got != nil {
+		t.Error("the request reached the backend without the assertion gated owed it")
+	}
+}

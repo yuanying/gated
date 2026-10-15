@@ -38,6 +38,7 @@ import (
 	gatedacme "github.com/yuanying/gated/internal/acme"
 	"github.com/yuanying/gated/internal/acme/http01"
 	gatev1alpha1 "github.com/yuanying/gated/internal/apis/gate/v1alpha1"
+	"github.com/yuanying/gated/internal/assertion"
 	"github.com/yuanying/gated/internal/authn"
 	"github.com/yuanying/gated/internal/authn/connector"
 	"github.com/yuanying/gated/internal/config"
@@ -128,6 +129,9 @@ func run(args []string) error {
 		return err
 	}
 	if err := setupSessionKey(mgr, cfg, log); err != nil {
+		return err
+	}
+	if err := setupAssertionKey(mgr, cfg, log); err != nil {
 		return err
 	}
 	if err := setupAccessTokens(mgr, log); err != nil {
@@ -250,6 +254,24 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 	}
 	keys := authn.KeyFunc(sessionKeys.Value)
 
+	// What a backend is told about who is behind a request is signed on
+	// every replica too, with keys shared the same way (ADR 0034).
+	assertionKeys := &controller.AssertionKeys{
+		Client:    mgr.GetClient(),
+		Namespace: cfg.Auth.AssertionKeySecret.Namespace,
+		Name:      cfg.Auth.AssertionKeySecret.Name,
+		Log:       log.WithName("assertion-key"),
+	}
+	if err := mgr.Add(assertionKeys); err != nil {
+		return fmt.Errorf("registering the assertion keys: %w", err)
+	}
+	// A replica that cannot sign would forward a logged-in visitor as
+	// nobody, so the backend would treat them as logged out. Keep
+	// traffic away until the keys have been read.
+	if err := mgr.AddReadyzCheck("assertion-key", assertionKeys.Ready); err != nil {
+		return fmt.Errorf("registering the assertion key readiness check: %w", err)
+	}
+
 	connectors, err := setupConnectors(mgr, cfg, log)
 	if err != nil {
 		return err
@@ -272,7 +294,10 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		// Where a completed login may return a visitor to is bounded by
 		// the hosts something routes (ADR 0018).
 		Hosts: tables,
-		Log:   log.WithName("authhost"),
+		// Published where the login is, so that no Ingress mistake
+		// can take it away from the backends that verify with it.
+		JWKS: &assertion.JWKSHandler{Keys: assertionKeys, Log: log.WithName("jwks")},
+		Log:  log.WithName("authhost"),
 	}
 
 	certificates := &proxy.Certificates{
@@ -304,6 +329,12 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 	dataPlane := &proxy.Handler{
 		Tables:   tables,
 		Backends: &controller.ServiceResolver{Reader: mgr.GetCache()},
+		// Whoever the decision named is vouched for to the backend,
+		// whichever door they came through (ADR 0034).
+		Assertions: &assertion.Signer{
+			Keys:   assertionKeys,
+			Issuer: assertion.Issuer(cfg.Auth.Host),
+		},
 		// Both run after the route is known and before anything is
 		// forwarded: the token is read first so that the decision has a
 		// subject to work from, and the decision itself is unchanged by
@@ -553,6 +584,24 @@ func setupSessionKey(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error
 	}
 	if err := mgr.Add(generator); err != nil {
 		return fmt.Errorf("registering the session key generator: %w", err)
+	}
+	return nil
+}
+
+// setupAssertionKey wires the runnable that writes the assertion signing key
+// when there is none.
+//
+// It is leader elected for the same reason as the session key: exactly one
+// replica may decide what the key is (ADR 0006, ADR 0034).
+func setupAssertionKey(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error {
+	generator := &controller.AssertionKeyGenerator{
+		Client:    mgr.GetClient(),
+		Namespace: cfg.Auth.AssertionKeySecret.Namespace,
+		Name:      cfg.Auth.AssertionKeySecret.Name,
+		Log:       log.WithName("assertion-key"),
+	}
+	if err := mgr.Add(generator); err != nil {
+		return fmt.Errorf("registering the assertion key generator: %w", err)
 	}
 	return nil
 }

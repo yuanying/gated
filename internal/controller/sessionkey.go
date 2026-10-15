@@ -67,17 +67,29 @@ func (s *SecretEntry) NeedLeaderElection() bool { return false }
 // leader may not have written it — and one that goes missing later must not
 // take the data plane down with it, so the last good value is kept.
 func (s *SecretEntry) Start(ctx context.Context) error {
+	keepReading(ctx, func(ctx context.Context) error {
+		_, err := s.refresh(ctx)
+		return err
+	}, s.held, func(err error) {
+		s.Log.V(1).Info("could not read "+s.What, "reason", err.Error())
+	})
+	return nil
+}
+
+// keepReading calls refresh until the context is cancelled: often until
+// something is held, and seldom after that.
+func keepReading(ctx context.Context, refresh func(context.Context) error, held func() bool, failed func(error)) {
 	for {
 		wait := secretRefreshInterval
-		if _, err := s.refresh(ctx); err != nil {
-			s.Log.V(1).Info("could not read "+s.What, "reason", err.Error())
-			if !s.held() {
+		if err := refresh(ctx); err != nil {
+			failed(err)
+			if !held() {
 				wait = secretRetryInterval
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case <-time.After(wait):
 		}
 	}
