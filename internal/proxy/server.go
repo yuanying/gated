@@ -128,8 +128,7 @@ func (s *Servers) Start(ctx context.Context) error {
 		// than serving half the traffic.
 		plain.Close()
 		secure.Close()
-		<-errs
-		return err
+		return errors.Join(err, <-errs)
 	case <-ctx.Done():
 	}
 
@@ -144,10 +143,9 @@ func (s *Servers) Start(ctx context.Context) error {
 	shutdownErr := errors.Join(plain.Shutdown(shutdownCtx), secure.Shutdown(shutdownCtx))
 	// Shutdown makes both Serve calls return; collect them so the goroutines
 	// are done before Start is.
-	<-errs
-	<-errs
+	serveErr := errors.Join(<-errs, <-errs)
 	s.Log.Info("stopped")
-	return shutdownErr
+	return errors.Join(shutdownErr, serveErr)
 }
 
 func (s *Servers) newServer(h http.Handler) *http.Server {
