@@ -20,8 +20,9 @@ import (
 )
 
 // The keys the assertion handed to a backend is signed with (ADR 0034). They
-// are kept the way the session key is (ADR 0006): one replica makes them,
-// every replica reads them, and only an operator ever changes them.
+// are kept the way the session key is (ADR 0006, ADR 0035): whichever replica
+// finds them missing makes them, every replica reads them, and only an
+// operator ever changes them.
 
 // AssertionKeys keeps the key set of one Secret in memory.
 //
@@ -131,9 +132,11 @@ func sameKeyData(a, b map[string][]byte) bool {
 
 // AssertionKeyGenerator writes a signing key if nobody has.
 //
-// It is the leader's job, for the same reason as the session key: every
-// replica has to sign with the same key, so exactly one of them may decide what
-// it is (ADR 0006). It runs once and returns.
+// It runs on every replica, for the same reason as the session key generator:
+// no replica becomes ready without the keys, so waiting for the lease would
+// leave a rollout stuck behind an older leader that never writes them
+// (ADR 0035). Every replica still signs with the same key, because only the
+// first write lands. It runs once and returns.
 type AssertionKeyGenerator struct {
 	// Client creates the Secret. It must not be backed by the TLS-only
 	// cache, or an existing Opaque Secret reads as absent.
@@ -145,8 +148,9 @@ type AssertionKeyGenerator struct {
 	Log logr.Logger
 }
 
-// NeedLeaderElection reports that one replica decides what the key is.
-func (g *AssertionKeyGenerator) NeedLeaderElection() bool { return true }
+// NeedLeaderElection reports that every replica writes the key if it is
+// missing.
+func (g *AssertionKeyGenerator) NeedLeaderElection() bool { return false }
 
 // Start creates the Secret if it is absent, and otherwise leaves it alone.
 //
@@ -192,7 +196,8 @@ func (g *AssertionKeyGenerator) Start(ctx context.Context) error {
 	}
 	if err := g.Client.Create(ctx, secret); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// Somebody got there first. Theirs is the key.
+			// Another replica, or an operator, got there
+			// first. Theirs is the key.
 			return nil
 		}
 		return fmt.Errorf("creating the assertion key Secret %s: %w", name, err)

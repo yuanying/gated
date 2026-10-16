@@ -386,8 +386,9 @@ npx --yes --package renovate renovate-config-validator
 [docs/backend-assertion.md](docs/backend-assertion.md) にある。アサーションを
 読まないバックエンドにとっては、知らないヘッダが1つ増えるだけである。
 
-署名鍵は `--assertion-key-secret` の Secret に置く。無ければリーダーが生成して
-書く。既にあるものは書き換えない。全レプリカがこの Secret を読み、読めていない
+署名鍵は `--assertion-key-secret` の Secret に置く。無ければ起動したレプリカが
+生成して書く。作れるのは最初の1つだけで、全レプリカがそれを使う。既にあるものは
+書き換えない（ADR 0035）。全レプリカがこの Secret を読み、読めていない
 レプリカは ready にならない。セッションの鍵とは別の非対称鍵なので、公開鍵を
 バックエンドに配っても、バックエンドが Cookie やアサーションを偽造できるように
 はならない。
@@ -463,7 +464,8 @@ fail-open を選んでいるので、`targetRef` の書き間違いは「保護�
 発行したホストにしか送られない。親ドメインには広げない。
 
 署名鍵は `--session-key-secret` の Secret（`key` エントリ）に置く。無ければ
-リーダーが生成して書く。既にあるものは書き換えない。鍵を差し替えると、その
+起動したレプリカが生成して書く。作れるのは最初の1つだけで、全レプリカがそれを
+使う。既にあるものは書き換えない（ADR 0035）。鍵を差し替えると、その
 installation の全セッションが一度に無効になる。
 
 Google は OIDC で、ID トークンの `email_verified` が真であることを必ず確認する。
@@ -531,13 +533,12 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 | 権限の集合の構築と認可の判定 | 全レプリカ |
 | 有効なトークンの集合の構築と照合 | 全レプリカ |
 | `AccessToken` の `lastUsedTime` 書き戻し | 全レプリカ |
+| セッション署名鍵・アサーション署名鍵が無いときの生成 | 全レプリカ（ADR 0035） |
 | ACME による証明書の取得・更新 | リーダーのみ |
 | `NetworkRole` / `NetworkRoleBinding` の status 書き戻し | リーダーのみ |
 | Ingress の `status.loadBalancer` 書き戻し | リーダーのみ |
 | 証明書と `NetworkRole` のメトリクス | リーダーのみ |
-| セッション署名鍵の生成 | リーダーのみ |
 | アサーションの署名と公開鍵の配布 | 全レプリカ |
-| アサーション署名鍵の生成 | リーダーのみ |
 | `AccessToken` のトークン生成と Secret への書き込み | リーダーのみ |
 
 リーダーは Lease で選ぶ。既定で有効で、`--leader-election-namespace` が要る。

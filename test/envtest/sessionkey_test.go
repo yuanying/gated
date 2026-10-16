@@ -4,6 +4,7 @@ package envtest_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,8 +18,9 @@ import (
 )
 
 // The signing key is the one piece of shared state authentication needs
-// (ADR 0006): the leader writes it, every replica reads it, and every replica
-// then verifies what any other one signed.
+// (ADR 0006): whichever replica finds it missing writes it, the first write
+// wins, every replica reads it, and every replica then verifies what any other
+// one signed (ADR 0035).
 //
 // These run against a real API server because what is being checked is the
 // interaction with it — a create that loses a race, a Secret already there,
@@ -47,21 +49,22 @@ func sessionKeyReader(t *testing.T, ns, name string) *controller.SecretEntry {
 	}
 }
 
-// TestTheLeaderWritesAKeyEveryReplicaCanRead is the arrangement ADR 0006
+// TestAReplicaWritesAKeyEveryReplicaCanRead is the arrangement ADR 0006
 // describes, with one replica generating and another reading what it wrote.
-func TestTheLeaderWritesAKeyEveryReplicaCanRead(t *testing.T) {
+func TestAReplicaWritesAKeyEveryReplicaCanRead(t *testing.T) {
 	ctx := context.Background()
 	ns := newNamespace(t)
 
 	generator := sessionKeyGenerator(t, ns, "gated-session-key")
-	if !generator.NeedLeaderElection() {
-		t.Error("the generator does not ask for the lease; every replica would decide on a different key (ADR 0006)")
+	if generator.NeedLeaderElection() {
+		t.Error("the generator waits for the lease; while an older version holds it, " +
+			"nobody writes the key and no new replica becomes ready (ADR 0035)")
 	}
 	if err := generator.Start(ctx); err != nil {
 		t.Fatalf("Start() = %v", err)
 	}
 
-	// A replica that never wins the lease reads what the leader wrote.
+	// Another replica reads what this one wrote.
 	follower := sessionKeyReader(t, ns, "gated-session-key")
 	if follower.NeedLeaderElection() {
 		t.Error("the reader waits for the lease; a follower that cannot verify a cookie logs everybody out")
@@ -84,7 +87,7 @@ func TestTheLeaderWritesAKeyEveryReplicaCanRead(t *testing.T) {
 		IssuedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
 	if err != nil {
-		t.Fatalf("the key the leader wrote cannot sign: %v", err)
+		t.Fatalf("the key that was written cannot sign: %v", err)
 	}
 	if _, err := authn.Verify(key, signed, authn.Expect{
 		Kind: authn.KindSession, Audience: "shop.example.com", Now: now,
@@ -109,8 +112,8 @@ func TestAnExistingKeyIsNeverReplaced(t *testing.T) {
 		t.Fatalf("Value() = %v", err)
 	}
 
-	// A restart, or a new leader.
-	if err := generator.Start(ctx); err != nil {
+	// A restart, or another replica starting.
+	if err := sessionKeyGenerator(t, ns, "gated-session-key").Start(ctx); err != nil {
 		t.Fatalf("the second Start() = %v", err)
 	}
 	second, err := sessionKeyReader(t, ns, "gated-session-key").Value(ctx)
@@ -119,6 +122,49 @@ func TestAnExistingKeyIsNeverReplaced(t *testing.T) {
 	}
 	if string(first) != string(second) {
 		t.Error("the key changed on a restart; every session in the installation would have ended")
+	}
+}
+
+// TestReplicasStartingTogetherSettleOnOneKey is a rollout of a fresh
+// installation, or of one whose Secret is gone: every replica finds nothing
+// and tries to write. Exactly one write lands, the others lose the race
+// without failing, and every replica reads the key that landed.
+func TestReplicasStartingTogetherSettleOnOneKey(t *testing.T) {
+	ctx := context.Background()
+	ns := newNamespace(t)
+
+	const replicas = 5
+	errs := make(chan error, replicas)
+	var wg sync.WaitGroup
+	for range replicas {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- sessionKeyGenerator(t, ns, "gated-session-key").Start(ctx)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("Start() = %v; a replica that lost the race to write must carry on", err)
+		}
+	}
+
+	var written corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "gated-session-key"}, &written); err != nil {
+		t.Fatalf("reading the Secret back: %v", err)
+	}
+	want := string(written.Data[authn.SessionKeySecretEntry])
+	for i := range replicas {
+		got, err := sessionKeyReader(t, ns, "gated-session-key").Value(ctx)
+		if err != nil {
+			t.Fatalf("replica %d: Value() = %v", i, err)
+		}
+		if string(got) != want {
+			t.Errorf("replica %d reads a different key from the one in the Secret; "+
+				"a cookie signed on one replica would not verify on another", i)
+		}
 	}
 }
 
@@ -189,7 +235,7 @@ func TestAKeyPlacedByHandIsLeftAlone(t *testing.T) {
 	}
 }
 
-// TestReadingAKeyThatIsNotThereYet is what a follower sees before the leader
+// TestReadingAKeyThatIsNotThereYet is what a replica sees before any of them
 // has written one: an error rather than an empty key, so that nothing signs
 // with nothing.
 func TestReadingAKeyThatIsNotThereYet(t *testing.T) {

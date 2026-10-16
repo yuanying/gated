@@ -102,7 +102,7 @@ func testConfig() config.Config {
 type setup func(mgr ctrl.Manager) error
 
 // dataPlaneSetups are the registration paths of the responsibilities ADR 0006
-// gives to every replica.
+// and ADR 0035 give to every replica.
 func dataPlaneSetups() map[string]setup {
 	return map[string]setup{
 		"setupDataPlane": func(mgr ctrl.Manager) error {
@@ -116,6 +116,16 @@ func dataPlaneSetups() map[string]setup {
 			// panic, and what is under test is which
 			// runnables were added.
 			return setupDataPlane(mgr, cfg, challenges, &proxy.AccessLog{}, logr.Discard())
+		},
+		// A replica cannot become ready without the keys, so the
+		// replica that writes them when they are missing must not be
+		// one that waits for the lease: an older version holding it
+		// would never write them (ADR 0035).
+		"setupSessionKey": func(mgr ctrl.Manager) error {
+			return setupSessionKey(mgr, testConfig(), logr.Discard())
+		},
+		"setupAssertionKey": func(mgr ctrl.Manager) error {
+			return setupAssertionKey(mgr, testConfig(), logr.Discard())
 		},
 	}
 }
@@ -134,12 +144,6 @@ func leaderOnlySetups() map[string]setup {
 		},
 		"setupAuthorizationStatus": func(mgr ctrl.Manager) error {
 			return setupAuthorizationStatus(mgr, nil, logr.Discard())
-		},
-		"setupSessionKey": func(mgr ctrl.Manager) error {
-			return setupSessionKey(mgr, testConfig(), logr.Discard())
-		},
-		"setupAssertionKey": func(mgr ctrl.Manager) error {
-			return setupAssertionKey(mgr, testConfig(), logr.Discard())
 		},
 		"setupAccessTokens": func(mgr ctrl.Manager) error {
 			return setupAccessTokens(mgr, logr.Discard())

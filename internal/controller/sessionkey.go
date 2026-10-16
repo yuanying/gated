@@ -20,8 +20,8 @@ import (
 	"github.com/yuanying/gated/internal/authn"
 )
 
-// The two halves of a shared secret: one replica makes it, every replica reads
-// it (ADR 0006).
+// The two halves of a shared secret: whichever replica finds it missing makes
+// it, every replica reads it (ADR 0006, ADR 0035).
 
 // The intervals SecretEntry polls at. Rotation is rare and manual, so the
 // steady-state interval is long; the short one is for the gap between a
@@ -63,8 +63,8 @@ func (s *SecretEntry) NeedLeaderElection() bool { return false }
 
 // Start keeps the held value up to date until the context is cancelled.
 //
-// It never fails the process. A Secret that is not there yet is ordinary — the
-// leader may not have written it — and one that goes missing later must not
+// It never fails the process. A Secret that is not there yet is ordinary — no
+// replica may have written it yet — and one that goes missing later must not
 // take the data plane down with it, so the last good value is kept.
 func (s *SecretEntry) Start(ctx context.Context) error {
 	keepReading(ctx, func(ctx context.Context) error {
@@ -157,9 +157,13 @@ func (s *SecretEntry) held() bool {
 
 // SessionKeyGenerator writes the session signing key if nobody has.
 //
-// It is the leader's job. Every replica has to sign with the same key, so
-// exactly one of them may decide what it is; the rest read what was written
-// (ADR 0006). It runs once and returns — there is nothing to keep doing.
+// It runs on every replica rather than on the leader alone. No replica becomes
+// ready without the key, so one that waited for the lease would be stuck
+// whenever the leader cannot write the key it is looking for — an older
+// version still holding the lease through a rollout that points the key at a
+// different Secret (ADR 0035). Every replica still signs with the same key:
+// writing is a create, only the first one lands, and the rest read what was
+// written. It runs once and returns — there is nothing to keep doing.
 type SessionKeyGenerator struct {
 	// Client creates the Secret. It must not be backed by the TLS-only
 	// cache, or an existing Opaque Secret reads as absent and this would
@@ -172,8 +176,9 @@ type SessionKeyGenerator struct {
 	Log logr.Logger
 }
 
-// NeedLeaderElection reports that one replica decides what the key is.
-func (g *SessionKeyGenerator) NeedLeaderElection() bool { return true }
+// NeedLeaderElection reports that every replica writes the key if it is
+// missing.
+func (g *SessionKeyGenerator) NeedLeaderElection() bool { return false }
 
 // Start creates the Secret if it is absent, and otherwise leaves it alone.
 //
@@ -219,9 +224,9 @@ func (g *SessionKeyGenerator) Start(ctx context.Context) error {
 	}
 	if err := g.Client.Create(ctx, secret); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// Somebody got there first — two leaders during a
-			// partition, or a hand-written Secret arriving between
-			// the read and the write. Theirs is the key.
+			// Somebody got there first — another replica starting
+			// at the same time, or a hand-written Secret arriving
+			// between the read and the write. Theirs is the key.
 			return nil
 		}
 		return fmt.Errorf("creating the session key Secret %s: %w", name, err)
