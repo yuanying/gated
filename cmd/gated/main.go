@@ -572,9 +572,11 @@ func setupConnectors(mgr ctrl.Manager, cfg config.Config, log logr.Logger) (*con
 // setupSessionKey wires the runnable that writes the session signing key when
 // there is none.
 //
-// It is leader elected. Every replica has to sign with the same key, so
-// exactly one of them may decide what it is (ADR 0006); the rest read what was
-// written, through the reader registered with the data plane.
+// It runs on every replica, not under the lease: no replica becomes ready
+// without the key, and a leader that cannot write it would leave the rest
+// waiting for ever (ADR 0035). Every replica still signs with the same key,
+// because only the first write lands; the rest read what was written, through
+// the reader registered with the data plane (ADR 0006).
 func setupSessionKey(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error {
 	generator := &controller.SessionKeyGenerator{
 		Client:    mgr.GetClient(),
@@ -591,8 +593,9 @@ func setupSessionKey(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error
 // setupAssertionKey wires the runnable that writes the assertion signing key
 // when there is none.
 //
-// It is leader elected for the same reason as the session key: exactly one
-// replica may decide what the key is (ADR 0006, ADR 0034).
+// It runs on every replica for the same reason as the session key: an older
+// version holding the lease through the upgrade that introduces the key would
+// never write it (ADR 0034, ADR 0035).
 func setupAssertionKey(mgr ctrl.Manager, cfg config.Config, log logr.Logger) error {
 	generator := &controller.AssertionKeyGenerator{
 		Client:    mgr.GetClient(),
