@@ -94,6 +94,7 @@ gated 本体は起動フラグで設定する。環境固有の値には既定�
 | `--acme-account-secret` | ACME アカウント鍵を置く Secret（`namespace/name`） |
 | `--auth-host` | 中央認証ホストのホスト名（例: `auth.example.com`） |
 | `--session-key-secret` | セッション Cookie の署名鍵を置く Secret（`namespace/name`） |
+| `--assertion-key-secret` | バックエンドへ渡すアサーションの署名鍵を置く Secret（`namespace/name`）。`--session-key-secret` とは別の Secret にする |
 | `--challenge-secret-namespace` | HTTP-01 のチャレンジトークンを置く namespace |
 | `--leader-election-namespace` | リーダー選出の Lease を置く namespace |
 
@@ -121,11 +122,18 @@ Identity Provider 側に登録するコールバック URL は、プロバイダ
 だけ変える（ADR 0021）。全体は `gated --help` で確認できる。
 
 このうち `--acme-account-secret` / `--session-key-secret` /
-`--challenge-secret-namespace` / `--leader-election-namespace` は
+`--assertion-key-secret` / `--challenge-secret-namespace` /
+`--leader-election-namespace` は
 `config/manager/deployment.yaml` が既に書いている。どれも「gated 自身が動いて
 いる namespace」を指すだけなので、Downward API で解決してある。overlay で足す
 必要があるのは、残りの `--acme-directory-url` / `--acme-email` / `--auth-host`
 と、Identity Provider の2〜3個である。
+
+`--assertion-key-secret` は、バックエンドへ主体を伝える機能（ADR 0034）と一緒に
+足された必須のフラグである。それより前の版から上げるときは、Deployment の引数に
+これを足さないと Pod が起動を拒否する。Secret は gated が作るので、用意するのは
+置き場所の指定だけである。手順は
+[docs/backend-assertion.md](docs/backend-assertion.md) の「版上げ」にある。
 
 `--shutdown-delay` は、Pod が endpoints から外れるより先に SIGTERM が届いたときの
 502 を減らすためのものである。イメージにシェルが無いので `preStop` の sleep は
@@ -314,6 +322,8 @@ npx --yes --package renovate renovate-config-validator
 | `__gated_session` / `__gated_login` / `__gated_state` の Cookie | 削る。gated の資格情報であってアプリのものではない |
 | その他の Cookie | 順序も含めてそのまま渡す |
 | 照合できた `AccessToken` | 削る（ADR 0004） |
+| クライアントが付けた `Gated-` で始まるヘッダ | すべて削る。この接頭辞は gated の予約である（ADR 0034） |
+| `Gated-Assertion` | 主体が決まった要求にだけ、gated が署名したものを付ける（次節） |
 
 正規形でないパスは、照合も転送もせず 400 で返す。`/a/../b`、`%2e%2e`、`..;`、
 および `%2F` や `%2E` を含むパスがこれにあたる（ADR 0012）。gated は受け取った
@@ -345,6 +355,42 @@ npx --yes --package renovate renovate-config-validator
 上限を設けないものもある。リクエストボディの大きさ、リクエスト全体の長さ、
 バックエンドが応答を返し始めるまでの時間、接続数とリクエストの頻度である。
 理由は ADR 0030 に書いてある。
+
+## バックエンドへ主体を伝える
+
+ログイン済みの要求、または `AccessToken` で認証された要求をバックエンドへ転送する
+とき、gated は「この主体を、このホストへの要求について認証した」という署名付きの
+アサーションを `Gated-Assertion` ヘッダに付ける（ADR 0034）。未ログインの要求には
+何も付けない。守られていない Ingress へ未ログインで来た要求も同じである。
+
+アサーションは JWS の compact 形式（JWT）で、署名は Ed25519（`alg: EdDSA`）だけを
+使う。
+
+| 部分 | 項目 | 中身 |
+|---|---|---|
+| ヘッダ | `alg` | `EdDSA` |
+| ヘッダ | `typ` | `gated-assertion+jwt` |
+| ヘッダ | `kid` | 署名した鍵の JWK thumbprint（RFC 7638） |
+| 本体 | `iss` | `https://<--auth-host>` |
+| 本体 | `sub` | 主体（`github:<login名>` など） |
+| 本体 | `aud` | 要求のホスト名。小文字で、ポートを含まない |
+| 本体 | `iat` / `exp` | 発行時刻と、その60秒後 |
+
+言っているのは認証の結果であって、認可の結果ではない。主体を許すかどうかは
+バックエンドが自分で決める。そうしておけば、gated を通らずに Service へ直接届いた
+要求や、`NetworkRole` の書き間違いで素通しになった Ingress への要求を、
+バックエンドが自分で断れる。
+
+公開鍵は中央認証ホストの `https://<--auth-host>/__gated/jwks.json` で JWKS として
+配る。応答は5分キャッシュしてよい。バックエンドが確かめる手順と、鍵の交換の手順は
+[docs/backend-assertion.md](docs/backend-assertion.md) にある。アサーションを
+読まないバックエンドにとっては、知らないヘッダが1つ増えるだけである。
+
+署名鍵は `--assertion-key-secret` の Secret に置く。無ければリーダーが生成して
+書く。既にあるものは書き換えない。全レプリカがこの Secret を読み、読めていない
+レプリカは ready にならない。セッションの鍵とは別の非対称鍵なので、公開鍵を
+バックエンドに配っても、バックエンドが Cookie やアサーションを偽造できるように
+はならない。
 
 ## 証明書
 
@@ -426,6 +472,8 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 交換のあと `/user` でアカウント名を得る。
 
 `/__gated/` 以下のパスは gated が予約している。アプリケーションへは転送されない。
+中央認証ホストでは、ログインの経路に加えて `/__gated/jwks.json`（アサーションの
+公開鍵）もここに含まれる。
 
 ## ブラウザを持たないクライアント
 
@@ -488,6 +536,8 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 | Ingress の `status.loadBalancer` 書き戻し | リーダーのみ |
 | 証明書と `NetworkRole` のメトリクス | リーダーのみ |
 | セッション署名鍵の生成 | リーダーのみ |
+| アサーションの署名と公開鍵の配布 | 全レプリカ |
+| アサーション署名鍵の生成 | リーダーのみ |
 | `AccessToken` のトークン生成と Secret への書き込み | リーダーのみ |
 
 リーダーは Lease で選ぶ。既定で有効で、`--leader-election-namespace` が要る。
@@ -552,7 +602,8 @@ alert はレプリカをまたいで読むことになる。対象が消えた�
 ## Status
 
 一通り実装が入っている。CRD の定義、起動設定、Ingress のルーティング、TLS 終端、
-ACME による証明書の取得と更新、リーダー選出、認可、認証、`AccessToken`、および
+ACME による証明書の取得と更新、リーダー選出、認可、認証、`AccessToken`、
+バックエンドへの主体の伝達、および
 gated 自身を動かすための manifest である。
 
 ゴールの4項目は kind 上の E2E（`make test-e2e`）で通しで確かめている。

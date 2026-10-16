@@ -60,6 +60,7 @@ spec:
             # one that turns out to be.
             - --acme-account-secret=$(POD_NAMESPACE)/gated-acme-account
             - --session-key-secret=$(POD_NAMESPACE)/gated-session-key
+            - --assertion-key-secret=$(POD_NAMESPACE)/gated-assertion-key
             - --challenge-secret-namespace=$(POD_NAMESPACE)
             - --leader-election-namespace=$(POD_NAMESPACE)
           env:
@@ -88,9 +89,10 @@ spec:
             periodSeconds: 20
           readinessProbe:
             # Reports not-ready until the routing table, the permissions, the
-            # tokens and the session key have all been read: a replica that
-            # has read none of them would answer as though nothing were
-            # protected.
+            # tokens, the session key and the assertion keys have all been
+            # read: a replica that has read none of them would answer as
+            # though nothing were protected, and one without the assertion
+            # keys would forward everybody to the backends as anonymous.
             httpGet:
               path: /readyz
               port: health

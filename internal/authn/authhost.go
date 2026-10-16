@@ -28,6 +28,11 @@ import (
 // exchanged at another's callback.
 const IdPCallbackPrefix = ReservedPrefix + "idp/"
 
+// JWKSPath is where the public keys a backend verifies assertions with are
+// published (ADR 0034). Like the rest of the login it is answered here, ahead
+// of routing, so no Ingress mistake can take it away.
+const JWKSPath = ReservedPrefix + "jwks.json"
+
 // ProviderParam names which provider a visitor chose.
 const ProviderParam = "provider"
 
@@ -65,6 +70,8 @@ type AuthHost struct {
 	Connectors *connector.Set
 	// Hosts bounds where a visitor may be returned to. Required.
 	Hosts Hosts
+	// JWKS answers JWKSPath. Nil answers it 404.
+	JWKS http.Handler
 	// Now reads the clock. Nil means time.Now.
 	Now func() time.Time
 	// Log records what happened to a login.
@@ -72,6 +79,13 @@ type AuthHost struct {
 }
 
 func (a *AuthHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == JWKSPath && a.JWKS != nil {
+		// The same for everybody and meant to be held, unlike
+		// everything below.
+		a.JWKS.ServeHTTP(w, r)
+		return
+	}
+
 	// Every answer here is about one visitor and one login in progress.
 	w.Header().Set("Cache-Control", "no-store")
 

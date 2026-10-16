@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -68,6 +69,22 @@ func main() {
 func echo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "gated-e2e backend\nmethod=%s\nhost=%s\npath=%s\n", r.Method, r.Host, r.URL.Path)
+
+	// The headers gated reserves, so that a test can see both what gated
+	// added and that what the client sent under the prefix never arrived
+	// (ADR 0034).
+	names := make([]string, 0, len(r.Header))
+	for name := range r.Header {
+		if strings.HasPrefix(strings.ToLower(name), "gated-") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, value := range r.Header.Values(name) {
+			fmt.Fprintf(w, "header %s=%s\n", name, value)
+		}
+	}
 }
 
 // idp answers the three requests gated's GitHub connector makes.

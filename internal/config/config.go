@@ -95,6 +95,12 @@ type Auth struct {
 	// SessionKeySecret holds the HMAC key the session cookies are signed
 	// with, shared across replicas.
 	SessionKeySecret SecretRef
+	// AssertionKeySecret holds the Ed25519 keys the assertion a backend
+	// is handed is signed with, and the ones published beside it
+	// (ADR 0034). It is separate from the session key: that one is
+	// symmetric, and handing it to a backend would let the backend forge
+	// both.
+	AssertionKeySecret SecretRef
 	// SessionTTL is how long a session cookie stays valid. A signed cookie
 	// cannot be revoked (ADR 0003), so this is the only thing that ends
 	// one.
@@ -212,6 +218,8 @@ func (c *Config) AddFlags(fs *flag.FlagSet) {
 		"Hostname of the central authentication host, for example auth.example.com. Required.")
 	fs.Var(&c.Auth.SessionKeySecret, "session-key-secret",
 		"Secret holding the session cookie signing key, as namespace/name. Created if missing. Required.")
+	fs.Var(&c.Auth.AssertionKeySecret, "assertion-key-secret",
+		"Secret holding the keys the assertion handed to backends is signed with, as namespace/name. Created if missing. Required.")
 	fs.DurationVar(&c.Auth.SessionTTL, "session-ttl", c.Auth.SessionTTL,
 		"How long a session cookie stays valid. A signed cookie cannot be revoked, so keep it short.")
 	fs.StringVar(&c.Auth.GitHub.ClientID, "github-client-id", c.Auth.GitHub.ClientID,

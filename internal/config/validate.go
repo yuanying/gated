@@ -140,6 +140,13 @@ func (c Config) validateAuth(report reportFunc) {
 	}
 
 	validateSecretRef(report, "session-key-secret", c.Auth.SessionKeySecret, true)
+	validateSecretRef(report, "assertion-key-secret", c.Auth.AssertionKeySecret, true)
+	// Each Secret is written whole by whoever finds it missing. Shared, one
+	// key would be written and the other found absent, and nothing would
+	// put it there.
+	if !c.Auth.AssertionKeySecret.IsZero() && c.Auth.AssertionKeySecret == c.Auth.SessionKeySecret {
+		report("assertion-key-secret", "must name a different Secret from --session-key-secret")
+	}
 
 	if c.Auth.SessionTTL <= 0 {
 		report("session-ttl", "must be positive")
