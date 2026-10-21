@@ -1,11 +1,15 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "A version is proposed only once it has been public for seven days, so that a release pulled or fixed in its first week never reaches a branch, and so never one Renovate merges on its own. internalChecksFilter is already strict by default; it is stated so that the wait is read here as holding back the branch and the pull request themselves, not only a status check on them",
   "extends": [
     "config:recommended",
     ":semanticCommitTypeAll(chore)"
   ],
   "timezone": "Asia/Tokyo",
   "dependencyDashboard": true,
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
+  "platformAutomerge": false,
   "postUpdateOptions": ["gomodTidy"],
   "kubernetes": {
     "description": "The kubernetes manager matches no files until it is told which ones, and this repository keeps its manifests in two places",
@@ -45,6 +49,11 @@
       "matchManagers": ["dockerfile"],
       "matchPackageNames": ["ghcr.io/letsencrypt/**"],
       "pinDigests": true
+    },
+    {
+      "description": "Patch, digest and pinning updates are merged by Renovate itself once every check on the pull request has passed. ci.yml runs on every pull request with no path filter, so that is every layer short of the live one, the generated artifacts and tidiness included (ADR 0026); a branch with no checks at all is one Renovate treats as pending and does not merge. platformAutomerge is off so that the merge waits for those checks without relying on the repository's auto-merge setting or branch protection. Minor and major updates, and a group holding one, only open a pull request. A week of nothing but these merges is what the weekly release workflow releases as a patch version (ADR 0036)",
+      "matchUpdateTypes": ["patch", "digest", "pin", "pinDigest"],
+      "automerge": true
     },
     {
       "description": "Workflows are already read by the github-actions manager. Grouping them keeps a handful of actions from arriving as a handful of pull requests, since they are updated together and reviewed the same way",
