@@ -1,0 +1,95 @@
+# The weekly patch release (ADR 0036)
+#
+# Once a week, releases the next patch version when everything since the
+# latest vX.Y.Z tag is Renovate's and some of it is what the image is built
+# from. Anything else is left to a person, who chooses the version and writes
+# the tag's message, as before (ADR 0029). Doing nothing is a success: the
+# run's log says why nothing was released. `make release-plan` asks the same
+# question on a laptop.
+#
+# A tag pushed with the run's token starts no workflow, so publish.yml would
+# never see this one. The image is pushed by calling publish.yml first, from
+# the commit about to be tagged, and the tag only follows once that succeeded:
+# a failed build leaves no tag pointing at an image that does not exist.
+# Pushing a version tag by hand still publishes through publish.yml.
+name: release
+
+on:
+  schedule:
+    - cron: '0 0 * * 1' # Monday 09:00 JST
+  workflow_dispatch:
+
+# Read-only here, and each job widens it to what it alone needs: the call to
+# publish.yml to write the package, the last job to push the tag.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: plan
+    # A dispatch can name any branch, but a release is cut from main only.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      message: ${{ steps.plan.outputs.message }}
+    steps:
+      # Every tag and the history back to the latest one.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - id: plan
+        run: make release-plan RELEASE_PLAN_ARGS="-github-output $GITHUB_OUTPUT"
+
+  image:
+    name: image
+    needs: plan
+    if: needs.plan.outputs.version != ''
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
+
+  tag:
+    name: tag
+    needs: [plan, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # Annotated, like the tags people push. github.sha is the same in every
+      # job of this run, so the tag lands on the commit the image was built
+      # from. The token is named as a secret, not read from the github
+      # context, for the reason publish.yml gives.
+      - name: Push the tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          MESSAGE: ${{ needs.plan.outputs.message }}
+        run: |
+          object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags" \
+            -f tag="$VERSION" -f message="$MESSAGE" -f object="$GITHUB_SHA" -f type=commit \
+            --jq .sha)"
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${VERSION}" -f sha="$object" >/dev/null
+          {
+            echo "### ${VERSION}"
+            echo
+            echo "- tagged: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${VERSION}"
+            echo
+            echo '```'
+            echo "$MESSAGE"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

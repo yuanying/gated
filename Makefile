@@ -108,6 +108,15 @@ test-e2e: ## Run the end-to-end tests against a kind cluster.
 verify-live: ## Order a certificate from a real ACME directory. Never run by CI.
 	$(GO) test -tags live -count=1 -timeout 30m -v ./test/e2e/...
 
+##@ Release
+
+# What the weekly release workflow asks before it releases anything (ADR 0036).
+# Run on a checkout with its tags to see what the next run would do; the
+# workflow passes `-github-output` through RELEASE_PLAN_ARGS.
+.PHONY: release-plan
+release-plan: ## Say whether the weekly run would release the next patch version, and why.
+	$(GO) run ./hack/release-plan $(RELEASE_PLAN_ARGS)
+
 ##@ Housekeeping
 
 .PHONY: tidy
