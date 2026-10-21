@@ -1,6 +1,7 @@
 # 0029. イメージは ref の名前で ghcr へ公開する
 
 - Date: 2026-08-22
+- Updated: 2026-10-21（Renovate のコミットだけからなる版タグは週次のワークフローが打つことにした。ADR 0036）
 - Status: Accepted
 
 ## Context
@@ -37,7 +38,7 @@ gated を実際のクラスターへ配備することになった。クラス�
 
 `latest` は公開しない。動くタグを2つ持つ理由が無く、`latest` は「どの ref から来たか」を答えられない唯一のタグになる。`config/manager/deployment.yaml` が `:latest` を書いていたが、これは公開されないタグを指していたので `:main` に改める。配備するときは overlay が版タグで上書きする（ADR 0023）。
 
-版タグの元になる git タグは人が打つ。main が緑であるコミットに対して打つ。publish 自体は CI の結果を待たない（後述）。
+版タグの元になる git タグは人が打つ。main が緑であるコミットに対して打つ。publish 自体は CI の結果を待たない（後述）。ただし前回の版から Renovate のコミットしか無い週は、週次のワークフローがパッチ版のタグを打ち、その前に同じ名前でイメージを push する（ADR 0036）。
 
 ### プラットフォームは linux/amd64 のみ
 
@@ -113,3 +114,4 @@ Renovate は github-actions のグループでこの新しいワークフロー�
 - [[0023-deployment-manifests]] — 配備側が overlay でイメージを上書きする側の決定
 - [[0027-dependency-updates]] — 固定した action を追わせる仕組み
 - [[0008-migration-from-ingress-nginx]] — このイメージを引く最初の配備
+- [[0036-weekly-dependency-release]] — 人が版タグを打つという決定を、人の変更を含む版に狭めた

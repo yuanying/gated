@@ -7,34 +7,52 @@
 # publishes that tag, and a deployment pins the version tag — `main` keeps
 # moving and is not something to pin. `latest` is not published at all.
 #
+# The weekly release (release.yml, ADR 0036) calls this with the version it is
+# about to tag. A tag pushed with the run's token starts no workflow, so the
+# image for that version is pushed here first, from the commit that is about
+# to be tagged, and the tag only follows once the image exists. The name is
+# still the ref's: it is the one that commit is about to get.
+#
 # This is the one workflow here that writes something and the one that cannot
 # run for a pull request. Both are why it is a file of its own: in ci.yml the
 # read-only permission at the top says the whole file writes nothing, and that
 # sentence is worth keeping true.
 name: publish
 
-# Push events only. A pull request from a fork raises no push event in this
-# repository, so no branch a fork wrote ever reaches the job below, which
-# holds a token that can write packages. A push inside a fork runs in that
-# fork, against that fork's packages. The `no-live-layer` job in ci.yml keeps
-# the trigger that would change this out of every workflow.
+# Push events, and the call from release.yml. A pull request from a fork
+# raises no push event in this repository, so no branch a fork wrote ever
+# reaches the job below, which holds a token that can write packages. A push
+# inside a fork runs in that fork, against that fork's packages. release.yml
+# runs on a schedule or by hand, only for main, and so never for a pull
+# request either. The `no-live-layer` job in ci.yml keeps the trigger that
+# would change this out of every workflow.
 on:
   push:
     branches: [main]
     tags: ['v*.*.*']
+  workflow_call:
+    inputs:
+      version:
+        description: The version tag release.yml is about to push (vX.Y.Z).
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 # Two pushes to main can be in flight at once, and the later one should win
 # the `main` tag. Cancelling is per ref, so a version tag is never cancelled
-# by a push to main.
+# by a push to main. A call from release.yml runs for main as well, and is
+# keyed on its version so that a push to main does not cancel it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.version || github.ref }}
   cancel-in-progress: true
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  # The ref this image is named after: the pushed one, or the version tag
+  # release.yml is about to push.
+  TAG: ${{ inputs.version || github.ref_name }}
 
 jobs:
   image:
@@ -76,7 +94,7 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
           # Left off, the push carries a provenance attestation, which turns a
           # single-platform image into an index with an entry no runtime asks
           # for. Whether to sign and attest is a decision this repository has
@@ -85,13 +103,12 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.version=${{ env.TAG }}
 
       # What was pushed, what it hashes to and where to look at it, on the
       # run's own page. Reading it should not mean opening a build log.
       - name: Say what was published
         env:
-          TAG: ${{ github.ref_name }}
           DIGEST: ${{ steps.build.outputs.digest }}
           SERVER: ${{ github.server_url }}
           REPO: ${{ github.repository }}

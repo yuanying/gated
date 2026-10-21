@@ -159,6 +159,17 @@ linters:
           - staticcheck
         text: "SA1019: .*(GetEventRecorderFor|scheme\\.Builder) is deprecated"
 
+      # release-plan asks git about the checkout it runs in. The arguments
+      # are fixed in the source apart from a range built from a version the
+      # program parsed itself, and the command is always git; nothing a
+      # caller passes reaches the command line (G204). The one file it opens
+      # is the one it was told to append to, $GITHUB_OUTPUT in the workflow:
+      # opening a path from the caller is what the flag is for (G304).
+      - path: hack/release-plan/main\.go
+        linters:
+          - gosec
+        text: "G204: Subprocess launched with variable|G304: Potential file inclusion via variable"
+
       # Binding a listener is not a request. The context a ListenConfig takes
       # bounds the bind itself, which is local and immediate; the lifetime
       # that matters is the server's, and that is already tied to the
