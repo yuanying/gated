@@ -2,6 +2,7 @@
 
 - Date: 2026-08-22
 - Updated: 2026-10-21（Renovate のコミットだけからなる版タグは週次のワークフローが打つことにした。ADR 0036）
+- Updated: 2026-10-27（main への push のあとに untagged の版を消すジョブを足し、パッケージに書き込むジョブが2つになった。ADR 0037）
 - Status: Accepted
 
 ## Context
@@ -115,3 +116,4 @@ Renovate は github-actions のグループでこの新しいワークフロー�
 - [[0027-dependency-updates]] — 固定した action を追わせる仕組み
 - [[0008-migration-from-ingress-nginx]] — このイメージを引く最初の配備
 - [[0036-weekly-dependency-release]] — 人が版タグを打つという決定を、人の変更を含む版に狭めた
+- [[0037-main-image-for-vulnerability-tracking]] — `main` を脆弱性の集計に読ませ、押し出された untagged の版を消す

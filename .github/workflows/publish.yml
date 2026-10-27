@@ -13,6 +13,8 @@
 # to be tagged, and the tag only follows once the image exists. The name is
 # still the ref's: it is the one that commit is about to get.
 #
+# A push to main also deletes the images it leaves untagged (ADR 0037).
+#
 # This is the one workflow here that writes something and the one that cannot
 # run for a pull request. Both are why it is a file of its own: in ci.yml the
 # read-only permission at the top says the whole file writes nothing, and that
@@ -122,3 +124,33 @@ jobs:
             echo "- built from: ${SERVER}/${REPO}/commit/${SHA}"
             echo "- package: ${SERVER}/users/${OWNER}/packages/container/package/gated"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Every push to main moves `main` onto a new image and leaves the one it
+  # pointed at untagged. Nothing asks for those by digest — a deployment pins
+  # a version tag — so they are deleted once the new one is up (ADR 0037).
+  # Tagged images are never touched. The action walks image indexes and keeps
+  # the platform manifests of a tagged one, so it stays safe if a platform or
+  # an attestation is added to the build above.
+  #
+  # Only a push to main runs it. A version tag never untags anything, and a
+  # call from release.yml must not be held up by it: a cleanup that fails or
+  # is cancelled there would fail the call and leave the version untagged.
+  # Pushes to main share one concurrency group above, so two of these never
+  # run against the package at once, which the action is not safe for.
+  cleanup:
+    name: cleanup
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      # Deletes every untagged version of ghcr.io/yuanying/gated, and logs the
+      # id of each one; a deleted version can be restored through the API by
+      # that id. Named as a secret for the same reason as the login above.
+      - uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          package: gated
+          delete-untagged: true
