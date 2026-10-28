@@ -1,11 +1,14 @@
-# The weekly patch release (ADR 0036)
+# The weekly patch release (ADR 0036), and the release on a vulnerability fix
+# (ADR 0038)
 #
-# Once a week, releases the next patch version when everything since the
-# latest vX.Y.Z tag is Renovate's and some of it is what the image is built
-# from. Anything else is left to a person, who chooses the version and writes
-# the tag's message, as before (ADR 0029). Doing nothing is a success: the
-# run's log says why nothing was released. `make release-plan` asks the same
-# question on a laptop.
+# Once a week, and as soon as a pull request fixing a vulnerability is merged,
+# releases the next patch version when everything since the latest vX.Y.Z tag
+# is Renovate's or the vulnerability responder's and some of it is what the
+# image is built from. Anything else is left to a person, who chooses the
+# version and writes the tag's message, as before (ADR 0029). Doing nothing is
+# a success: the run's summary says why nothing was released and, when people's
+# commits stopped it, lists them with the commands to release by hand.
+# `make release-plan` asks the same question on a laptop.
 #
 # A tag pushed with the run's token starts no workflow, so publish.yml would
 # never see this one. The image is pushed by calling publish.yml first, from
@@ -18,37 +21,72 @@ on:
   schedule:
     - cron: '0 0 * * 1' # Monday 09:00 JST
   workflow_dispatch:
+  # The vulnerability responder's pull requests come from branches named
+  # vuln-responder/… in this repository. GitHub cannot filter on the head
+  # branch here, so every pull request closed against main starts a run, and
+  # the plan job below drops all but a merged one of those (ADR 0038).
+  #
+  # Only the closing of a merged pull request is acted on, so what is checked
+  # out is the merge commit, which is already on main: nothing that has not
+  # been merged is ever built here. A pull request from a fork never gets
+  # past the plan job, and its token could not write a package anyway.
+  pull_request:
+    types: [closed]
+    branches: [main]
 
 # Read-only here, and each job widens it to what it alone needs: the call to
 # publish.yml to write the package, the last job to push the tag.
 permissions:
   contents: read
 
+# One release at a time, whatever started it, so that the weekly run and a
+# fix never both tag the same version. Only one run waits behind the one in
+# progress, and a newer one replaces it. A run for a pull request that is not
+# a merged fix gets a group of its own, so that it cannot replace a waiting
+# release while doing nothing itself. The condition is the plan job's, below.
 concurrency:
-  group: ${{ github.workflow }}
+  group: >-
+    ${{ github.workflow }}-${{
+      (github.event_name != 'pull_request'
+        || (github.event.pull_request.merged
+          && startsWith(github.event.pull_request.head.ref, 'vuln-responder/')
+          && github.event.pull_request.head.repo.full_name == github.repository))
+      && 'release' || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   plan:
     name: plan
-    # A dispatch can name any branch, but a release is cut from main only.
-    if: github.ref == 'refs/heads/main'
+    # A dispatch can name any branch, but a release is cut from main only. A
+    # pull request counts only once it is merged, and only when it is the
+    # vulnerability responder's, from a branch of this repository.
+    if: >-
+      github.event_name == 'pull_request'
+        && github.event.pull_request.merged
+        && startsWith(github.event.pull_request.head.ref, 'vuln-responder/')
+        && github.event.pull_request.head.repo.full_name == github.repository
+      || github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       version: ${{ steps.plan.outputs.version }}
       message: ${{ steps.plan.outputs.message }}
+      sha: ${{ steps.plan.outputs.sha }}
     steps:
-      # Every tag and the history back to the latest one.
+      # Every tag and the history back to the latest one. For a merged pull
+      # request that is the history up to its merge commit on main, not
+      # main's head: a person's commit merged right after it is not this
+      # run's to judge, and the next run sees it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - id: plan
-        run: make release-plan RELEASE_PLAN_ARGS="-github-output $GITHUB_OUTPUT"
+        run: make release-plan RELEASE_PLAN_ARGS="-github-output $GITHUB_OUTPUT -step-summary $GITHUB_STEP_SUMMARY"
 
   image:
     name: image
@@ -60,6 +98,7 @@ jobs:
     uses: ./.github/workflows/publish.yml
     with:
       version: ${{ needs.plan.outputs.version }}
+      sha: ${{ needs.plan.outputs.sha }}
 
   tag:
     name: tag
@@ -69,18 +108,20 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Annotated, like the tags people push. github.sha is the same in every
-      # job of this run, so the tag lands on the commit the image was built
-      # from. The token is named as a secret, not read from the github
-      # context, for the reason publish.yml gives.
+      # Annotated, like the tags people push. The plan job says which commit
+      # it judged and the image job built from the same one, so the tag lands
+      # on the commit the image was built from. The token is named as a
+      # secret, not read from the github context, for the reason publish.yml
+      # gives.
       - name: Push the tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.plan.outputs.version }}
           MESSAGE: ${{ needs.plan.outputs.message }}
+          SHA: ${{ needs.plan.outputs.sha }}
         run: |
           object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags" \
-            -f tag="$VERSION" -f message="$MESSAGE" -f object="$GITHUB_SHA" -f type=commit \
+            -f tag="$VERSION" -f message="$MESSAGE" -f object="$SHA" -f type=commit \
             --jq .sha)"
           gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
             -f ref="refs/tags/${VERSION}" -f sha="$object" >/dev/null
