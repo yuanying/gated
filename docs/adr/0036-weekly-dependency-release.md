@@ -81,3 +81,4 @@ Go の tool ディレクティブだけの更新も `go.mod` を変えるので�
 - [[0026-continuous-integration]] — 自動マージの可否を決める判定
 - [[0007-test-strategy]] — 判定を純関数としてユニットテストで固める
 - [[0025-live-verification-against-a-real-authority]] — CI に入らない層。自動でマージされた更新が見逃しうる範囲
+- [[0038-release-on-a-vulnerability-fix]] — 判定の対象に脆弱性対応の係の bot を足し、係の PR のマージをリリースのきっかけに加えた

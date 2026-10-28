@@ -114,7 +114,7 @@ verify-live: ## Order a certificate from a real ACME directory. Never run by CI.
 # Run on a checkout with its tags to see what the next run would do; the
 # workflow passes `-github-output` through RELEASE_PLAN_ARGS.
 .PHONY: release-plan
-release-plan: ## Say whether the weekly run would release the next patch version, and why.
+release-plan: ## Say whether release.yml would release the next patch version, and why.
 	$(GO) run ./hack/release-plan $(RELEASE_PLAN_ARGS)
 
 ##@ Housekeeping

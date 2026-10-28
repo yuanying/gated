@@ -80,7 +80,10 @@ jobs:
 
       # Publishing is kept off pull requests by its trigger alone: a fork's
       # pull request raises no push event here, so nothing a fork wrote is
-      # ever run by the job holding a token that can write packages. The
+      # ever run by the job holding a token that can write packages. The one
+      # pull request event that publishes is release.yml's, for a merged
+      # vulnerability fix from a branch of this repository, and it builds the
+      # merge commit already on main (ADR 0038). The
       # trigger that would undo that checks out the fork's branch with this
       # repository's token, and nothing here needs it (ADR 0029). Its name is
       # written in the bracket form below for the same reason as the patterns
