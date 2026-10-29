@@ -2,6 +2,7 @@
 
 - Date: 2026-08-22
 - Updated: 2026-10-13（アクセスログに転送先の endpoint を足した。ADR 0033）
+- Updated: 2026-10-29（ServiceAccount の token の受け付けと TokenReview を数えるメトリクスを足した。ADR 0039）
 - Status: Accepted
 
 ## Context
@@ -83,6 +84,10 @@ controller-runtime が既に持っている registry に載せる。エンドポ
 | `gated_certificate_not_after_timestamp_seconds` | gauge | `namespace`, `secret`, `host` |
 | `gated_certificate_renewal_failures` | gauge | `namespace`, `secret` |
 | `gated_networkrole_target_resolved` | gauge (0/1) | `namespace`, `name` |
+| `gated_serviceaccount_tokens_total` | counter | `result` |
+| `gated_serviceaccount_token_reviews_total` | counter | `result` |
+
+ServiceAccount の2つは ADR 0039 で足した。前者は提示された ServiceAccount の token を、受け付けたか、なぜ受け付けなかったかで数える。後者は API サーバへの TokenReview を、返った答えで数える。どちらも全レプリカが出し、ラベルの値は固定の集合である。
 
 ラベルに入れないものを決めておく。
 
@@ -152,3 +157,4 @@ fail-open の穴（ADR 0002）が alert にできるようになる。`NetworkRo
 - [[0013-data-plane]] — クライアントの申告する転送ヘッダを信じない決定
 - [[0014-certificate-renewal-and-failure]] — 更新の失敗を静かに済ませる決定
 - [[0033-forwarding-to-ready-endpoints]] — 転送先の endpoint の選び方と 503
+- [[0039-serviceaccount-subject-and-tokenreview]] — ServiceAccount の token のメトリクス

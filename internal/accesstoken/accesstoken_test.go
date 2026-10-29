@@ -123,6 +123,9 @@ func TestSnapshotMatchesOnTheDigest(t *testing.T) {
 		// A token may not act as a class of caller (ADR 0010). The CRD
 		// refuses one at admission; this is the second lock.
 		{Identity: Identity{Subject: "system:authenticated", Namespace: "shop", Name: "everyone"}, Hash: Hash(stale)},
+		// Nor pass for a ServiceAccount, whose own tokens are short-lived
+		// and vouched for by the API server (ADR 0039).
+		{Identity: Identity{Subject: "system:serviceaccount:shop:robot", Namespace: "shop", Name: "workload"}, Hash: Hash(stale)},
 	})
 
 	if got, want := snapshot.Len(), 2; got != want {

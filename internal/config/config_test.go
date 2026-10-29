@@ -334,6 +334,30 @@ func TestValidate(t *testing.T) {
 			invalid: []string{"publish-address"},
 		},
 		{
+			// ServiceAccount tokens are a door that is opened on
+			// purpose: naming no audience leaves it shut, and is not
+			// a startup failure (ADR 0039).
+			name:   "no service account audience leaves the door shut",
+			mutate: func(c *config.Config) { c.Auth.ServiceAccount.Audience = "" },
+		},
+		{
+			name:   "a service account audience opens it",
+			mutate: func(c *config.Config) { c.Auth.ServiceAccount.Audience = "https://auth.example.com" },
+		},
+		{
+			name:    "a service account audience with a space in it is a typo",
+			mutate:  func(c *config.Config) { c.Auth.ServiceAccount.Audience = "https://auth.example.com a2a" },
+			invalid: []string{"serviceaccount-audience"},
+		},
+		{
+			name: "a remembered answer must last some time",
+			mutate: func(c *config.Config) {
+				c.Auth.ServiceAccount.Audience = "https://auth.example.com"
+				c.Auth.ServiceAccount.TokenTTL = 0
+			},
+			invalid: []string{"serviceaccount-token-ttl"},
+		},
+		{
 			name:    "the shutdown delay must not run backwards",
 			mutate:  func(c *config.Config) { c.ShutdownDelay = -time.Second },
 			invalid: []string{"shutdown-delay"},
@@ -430,6 +454,14 @@ func TestDefaultCarriesNoEnvironmentSpecificValues(t *testing.T) {
 	}
 	if !c.AccessLog {
 		t.Error("--access-log default = off, want on")
+	}
+	// Which audience a token must be minted for names a deployment; how
+	// long an answer about one is remembered does not.
+	if c.Auth.ServiceAccount.Audience != "" {
+		t.Errorf("--serviceaccount-audience default = %q, want empty", c.Auth.ServiceAccount.Audience)
+	}
+	if c.Auth.ServiceAccount.TokenTTL != time.Minute {
+		t.Errorf("--serviceaccount-token-ttl default = %v, want 1m", c.Auth.ServiceAccount.TokenTTL)
 	}
 	if c.ShutdownDelay <= 0 {
 		t.Errorf("--shutdown-delay default = %v, want a wait long enough for an endpoint removal to spread", c.ShutdownDelay)
@@ -549,6 +581,8 @@ func TestAddFlagsRoundTrip(t *testing.T) {
 	want.Publish.Addresses = config.Addresses{"203.0.113.10", "2001:db8::1"}
 	want.AccessLog = false
 	want.ShutdownDelay = 7 * time.Second
+	want.Auth.ServiceAccount.Audience = "https://auth.example.com"
+	want.Auth.ServiceAccount.TokenTTL = 30 * time.Second
 	want.LeaderElection.LeaseDuration = 20 * time.Second
 	want.LeaderElection.RenewDeadline = 15 * time.Second
 	want.LeaderElection.RetryPeriod = 3 * time.Second
@@ -578,6 +612,8 @@ func TestAddFlagsRoundTrip(t *testing.T) {
 		"--publish-address=2001:db8::1",
 		"--access-log=false",
 		"--shutdown-delay=7s",
+		"--serviceaccount-audience=https://auth.example.com",
+		"--serviceaccount-token-ttl=30s",
 	}
 
 	got, fs := config.Default(), config.NewFlagSet("gated")

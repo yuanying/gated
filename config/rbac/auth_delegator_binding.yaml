@@ -1,0 +1,22 @@
+# Lets gated ask the API server about the ServiceAccount tokens it is
+# presented (ADR 0039). system:auth-delegator is the ClusterRole the API
+# server ships for exactly this — creating TokenReviews and
+# SubjectAccessReviews on behalf of a caller — and binding it here keeps the
+# generated role.yaml to what gated's own reconcilers need.
+#
+# It grants nothing until --serviceaccount-audience is set: without an
+# audience gated never sends a TokenReview.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gated-auth-delegator
+  labels:
+    app.kubernetes.io/name: gated
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: gated
+    namespace: gated-system

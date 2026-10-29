@@ -1,6 +1,7 @@
 # 0009. 起動設定の与え方
 
 - Date: 2026-08-21
+- Updated: 2026-10-29（未指定なら機能を閉じる、という環境固有の値の扱いを ServiceAccount の audience について書いた。ADR 0039）
 - Status: Accepted
 
 ## Context
@@ -20,6 +21,8 @@ gated は ACME のディレクトリ URL、連絡先、中央認証ホスト、I
 環境固有の値には既定値を与えず、未指定なら起動を拒否する。ACME のディレクトリ URL と連絡先、中央認証ホスト、Secret の参照、namespace がこれにあたる。
 
 既定値を持たせるのは、どこで動かしても同じでよい値に限る。リッスンアドレスはワイルドカードへのバインドであり場所を選ばない。リーダー選出のタイムアウトも同様である。IngressClass の名前だけは `gated` を既定とする。これは gated 自身の名前であって環境の名前ではない。
+
+入口を1つ開くかどうかを決める値は、環境固有でも未指定で起動を拒否しない。未指定はその入口を閉じることを意味する。ServiceAccount の token を受け付ける audience（`--serviceaccount-audience`、ADR 0039）がこれにあたる。何かにフォールバックするのではなく、何も受け付けない。
 
 「未指定なら何かにフォールバックする」形は採らない。たとえば namespace を「自分が動いている namespace」で補うと、同じ manifest が置かれた場所によって別のものを指すことになり、設定を見ても何を指しているか分からなくなる。
 
@@ -55,3 +58,4 @@ Identity Provider を必須にしたため、「認可は使わずルーティ�
 - [[0005-certificate-issuance]] — ACME の設定を CRD にしないという決定
 - [[0006-high-availability]] — リーダー選出と共有する Secret
 - [[0007-test-strategy]] — 純関数として検証を書く方針
+- [[0039-serviceaccount-subject-and-tokenreview]] — 未指定なら閉じる入口

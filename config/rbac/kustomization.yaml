@@ -6,3 +6,4 @@ resources:
   # `make generate`. Edit the markers, not this file.
   - role.yaml
   - role_binding.yaml
+  - auth_delegator_binding.yaml

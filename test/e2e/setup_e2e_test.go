@@ -52,6 +52,11 @@ const (
 	openHost  = "open.example.com"
 	appHost   = "app.example.com"
 	tokenHost = "token.example.com"
+	saHost    = "serviceaccount.example.com"
+
+	// serviceAccountAudience is the audience gated accepts ServiceAccount
+	// tokens for (ADR 0039).
+	serviceAccountAudience = "https://" + authHost
 
 	// idpBase is where gated reaches the stand-in identity provider, and
 	// where it sends a browser to log in. One address for both, because
@@ -219,6 +224,7 @@ func applyGated(ctx context.Context) error {
 		"--github-client-secret-ref="+gatedNamespace+"/github-oauth/clientSecret",
 		"--github-base-url="+idpBase,
 		"--github-api-url="+idpBase,
+		"--serviceaccount-audience="+serviceAccountAudience,
 		// Short enough that a test does not spend a minute waiting for
 		// a replica to notice it lost the lease.
 		"--leader-election-lease-duration=5s",

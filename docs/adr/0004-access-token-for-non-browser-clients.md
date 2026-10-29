@@ -1,6 +1,7 @@
 # 0004. 非ブラウザクライアントの認証: AccessToken
 
 - Date: 2026-08-21
+- Updated: 2026-10-29（クラスター内の機械のために、ServiceAccount の token を TokenReview で確かめる入口を ADR 0039 で足した）
 - Status: Accepted
 
 ## Context
@@ -30,6 +31,8 @@ BASIC 認証のパスワード欄でも受け付けるのは、Docker クライ�
 
 Kubernetes の ServiceAccount トークンを `TokenReview` で検証する案も検討したが、主たる用途である手元の `docker login` に使いにくいため採らなかった。将来クラスター内からのアクセスに必要になれば、主体の種類として追加できる。
 
+その必要が生じ、ADR 0039 で ServiceAccount の token を受け付ける入口を足した。`AccessToken` を置き換えるものではなく、別の入口である。手元のクライアントはこれまでどおり `AccessToken` を使い、クラスターの中の機械は自分の ServiceAccount の token を使う。`AccessToken` に ServiceAccount を名乗らせることはできない。
+
 ## Consequences
 
 BASIC 認証を全廃しつつ Docker registry を使い続けられる。クライアント側の設定は `docker login` のパスワードをトークンに差し替えるだけで済む。
@@ -50,3 +53,4 @@ BASIC 認証のパスワード欄でトークンを受け付けるというこ�
 - [[0003-authentication-and-session]] — ブラウザ経路の認証
 - [[0008-migration-from-ingress-nginx]] — BASIC 認証からの移行
 - [[0022-presenting-and-checking-a-token]] — 2つの入口の実装と、何と照合するか
+- [[0039-serviceaccount-subject-and-tokenreview]] — ServiceAccount の token という3つ目の入口

@@ -72,10 +72,11 @@ func echo(w http.ResponseWriter, r *http.Request) {
 
 	// The headers gated reserves, so that a test can see both what gated
 	// added and that what the client sent under the prefix never arrived
-	// (ADR 0034).
+	// (ADR 0034). Authorization too, so that a test can see which
+	// credentials gated spent and which it passed on (ADR 0022, ADR 0039).
 	names := make([]string, 0, len(r.Header))
 	for name := range r.Header {
-		if strings.HasPrefix(strings.ToLower(name), "gated-") {
+		if strings.HasPrefix(strings.ToLower(name), "gated-") || name == "Authorization" {
 			names = append(names, name)
 		}
 	}

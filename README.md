@@ -7,7 +7,7 @@ ACME による証明書の自動発行と、Identity Provider によるアクセ
 標準の `networking.k8s.io/v1` Ingress を読んで HTTP リクエストをルーティングする Ingress Controller である。加えて次の2つを単一のプロセスに統合している。
 
 - **証明書の自動発行** — Ingress の `spec.tls` を見て Let's Encrypt から証明書を取得・更新する。cert-manager は不要
-- **アクセス制御** — GitHub / Google でユーザーを認証し、`NetworkRole` / `NetworkRoleBinding` で「誰がどこにアクセスできるか」を宣言する。BASIC 認証は不要
+- **アクセス制御** — GitHub / Google でユーザーを、ServiceAccount の token でクラスターの中の機械を認証し、`NetworkRole` / `NetworkRoleBinding` で「誰がどこにアクセスできるか」を宣言する。BASIC 認証は不要
 
 「誰がアクセスできるか」は Ingress リソースには書かない。Ingress は経路を、`NetworkRole` は権限を、それぞれ独立して表現する。
 
@@ -35,6 +35,7 @@ kubectl apply -k config/default
 | CustomResourceDefinition | `networkroles` / `networkrolebindings` / `accesstokens` | 認可とトークンの語彙 |
 | ServiceAccount | `gated` | プロセスの身元 |
 | ClusterRole / ClusterRoleBinding | `gated` | 後述の権限 |
+| ClusterRoleBinding | `gated-auth-delegator` | `system:auth-delegator` を与える。ServiceAccount の token の確認に使う |
 | Deployment | `gated` | 本体。既定で2レプリカ |
 | Service | `gated` | ClusterIP。80 と 443 を待ち受ける |
 | IngressClass | `gated` | `spec.controller` は `gate.unstable.cloud/ingress-controller` |
@@ -82,6 +83,11 @@ Secret に `delete` は含まれていない。gated は自分が作った Secre
 Ingress は全 namespace にあり、その `spec.tls` が指す Secret も全 namespace に
 あるので、この role は ClusterRole である。
 
+これとは別に、`config/rbac/auth_delegator_binding.yaml` が gated の ServiceAccount を
+組み込みの ClusterRole `system:auth-delegator` に結ぶ。ServiceAccount の token を
+確かめるための TokenReview を作る権限で、`--serviceaccount-audience` を指定した
+ときにだけ使われる（ADR 0039）。生成される ClusterRole には含めていない。
+
 ### 起動フラグ
 
 gated 本体は起動フラグで設定する。環境固有の値には既定値が無く、指定を忘れると
@@ -116,10 +122,16 @@ Identity Provider 側に登録するコールバック URL は、プロバイダ
 担当する IngressClass 名（`--ingress-class`、既定 `gated`）、リーダー選出の
 タイムアウト（`--leader-election-*`）、セッションの寿命（`--session-ttl`、既定
 12時間）、アクセスログの有無（`--access-log`、既定 on）、停止を求められてから
-リスナーを閉じるまでの待ち（`--shutdown-delay`、既定 5秒）、Identity Provider の
+リスナーを閉じるまでの待ち（`--shutdown-delay`、既定 5秒）、ServiceAccount の
+token について API サーバの答えを覚えておく時間（`--serviceaccount-token-ttl`、
+既定 1分）、Identity Provider の
 エンドポイント（`--github-base-url` / `--github-api-url` / `--google-issuer`）で
 ある。最後の3つは GitHub Enterprise を使う場合とテスト用のモック IdP を使う場合に
 だけ変える（ADR 0021）。全体は `gated --help` で確認できる。
+
+`--serviceaccount-audience` は既定値を持たないが、指定しなくても起動する。
+指定しなければ ServiceAccount の token を受け付けない。指定すると、その audience で
+発行された token だけを受け付ける（ADR 0039、後述）。
 
 このうち `--acme-account-secret` / `--session-key-secret` /
 `--assertion-key-secret` / `--challenge-secret-namespace` /
@@ -344,6 +356,8 @@ npx --yes --package renovate renovate-config-validator
 | `__gated_session` / `__gated_login` / `__gated_state` の Cookie | 削る。gated の資格情報であってアプリのものではない |
 | その他の Cookie | 順序も含めてそのまま渡す |
 | 照合できた `AccessToken` | 削る（ADR 0004） |
+| 受け付けた ServiceAccount の token | 削る（ADR 0039） |
+| gated が受け付けなかった `Authorization` | そのまま渡す。別の audience の ServiceAccount の token もここに入る（ADR 0022） |
 | クライアントが付けた `Gated-` で始まるヘッダ | すべて削る。この接頭辞は gated の予約である（ADR 0034） |
 | `Gated-Assertion` | 主体が決まった要求にだけ、gated が署名したものを付ける（次節） |
 
@@ -380,7 +394,8 @@ npx --yes --package renovate renovate-config-validator
 
 ## バックエンドへ主体を伝える
 
-ログイン済みの要求、または `AccessToken` で認証された要求をバックエンドへ転送する
+ログイン済みの要求、`AccessToken` で認証された要求、または ServiceAccount の token で
+認証された要求をバックエンドへ転送する
 とき、gated は「この主体を、このホストへの要求について認証した」という署名付きの
 アサーションを `Gated-Assertion` ヘッダに付ける（ADR 0034）。未ログインの要求には
 何も付けない。守られていない Ingress へ未ログインで来た要求も同じである。
@@ -394,7 +409,7 @@ npx --yes --package renovate renovate-config-validator
 | ヘッダ | `typ` | `gated-assertion+jwt` |
 | ヘッダ | `kid` | 署名した鍵の JWK thumbprint（RFC 7638） |
 | 本体 | `iss` | `https://<--auth-host>` |
-| 本体 | `sub` | 主体（`github:<login名>` など） |
+| 本体 | `sub` | 主体（`github:<login名>`、`system:serviceaccount:<namespace>:<name>` など） |
 | 本体 | `aud` | 要求のホスト名。小文字で、ポートを含まない |
 | 本体 | `iat` / `exp` | 発行時刻と、その60秒後 |
 
@@ -442,9 +457,11 @@ HTTP メソッドの組で、パスの語彙は RBAC の `nonResourceURLs` に�
 末尾 `*` による前方一致、`*` 単独の3つだけを受け付ける。
 
 `NetworkRoleBinding` の `subjects` に書けるのは、`github:<login名>` /
-`google:<メールアドレス>` / `system:authenticated` / `system:unauthenticated` の4つ
-である。綴りはスキーマで検証されるので、書き間違いは `kubectl apply` の時点で弾かれる
-（ADR 0010）。
+`google:<メールアドレス>` / `system:authenticated` / `system:unauthenticated` /
+`system:serviceaccount:<namespace>:<name>` の5つである。最後のものは RBAC と同じ綴りの
+ServiceAccount である（ADR 0039）。綴りはスキーマで検証されるので、書き間違いは
+`kubectl apply` の時点で弾かれる（ADR 0010）。`system:authenticated` には、gated の
+audience の token を持つ ServiceAccount も含まれる。
 
 判定の規則は次の通り。
 
@@ -541,6 +558,50 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 `status.lastUsedTime` に最終使用日時が記録される。使われなくなったトークンを
 見つけるためのもので、書き込みは1分に1回程度に間引かれる。精度はそのぶん粗い。
 
+### クラスターの中の機械: ServiceAccount の token
+
+クラスターの中で動くものは、人の `AccessToken` を借りずに、自分の ServiceAccount の
+token で gated を通れる（ADR 0039）。`--serviceaccount-audience` を指定したときだけ
+有効になる。
+
+呼ぶ側は、gated の audience を付けた token を projected volume か TokenRequest
+（`kubectl create token <ServiceAccount> --audience <gated の audience>` と同じもの）
+で手に入れ、`Authorization: Bearer` で付ける。BASIC 認証のパスワード欄では
+受け付けない。主体は `system:serviceaccount:<namespace>:<name>` で、
+`NetworkRoleBinding` の `subjects` にそのまま書く。判定はブラウザや `AccessToken` と
+まったく同じ規則で行われ、許可されていなければ 403 になる。
+
+gated は Bearer の値の形で入口を決める。`gat_` で始まれば `AccessToken`、JWT の形を
+していれば ServiceAccount の token である。後者は TokenReview で API サーバに尋ね、
+次をすべて満たすものだけを受け付ける。
+
+- API サーバが token を認めた（`status.authenticated`）
+- 認められた audience に gated の audience が含まれる（`status.audiences`）
+- 利用者が `system:serviceaccount:<namespace>:<name>` の形である
+
+それ以外の token——別の audience、期限切れ、偽物、API サーバに尋ねられなかった
+もの——は **`Authorization` ヘッダに触らずにそのまま**バックエンドへ渡し、その要求は
+未ログインとして判定する。自前で token を確かめているバックエンド（例えば別の
+audience を受け付ける fraction-agents）は、これまでどおり動く。受け付けた token は
+バックエンドへ渡さず、代わりに `Gated-Assertion` で主体を伝える。
+
+API サーバの答えは token の SHA-256 をキーに `--serviceaccount-token-ttl`（既定 1分）
+だけ覚えておく。受け付けた答えは token 自身の期限を超えては覚えない。断った答えも
+覚えるので、同じ偽物を繰り返し送られても API サーバに尋ねるのは1分に1回である。
+token 自身が書いている audience が違うもの、期限が切れているものは、API サーバに
+尋ねずに断る。
+
+API サーバが落ちていても、覚えている token と、Cookie・`AccessToken` の経路は
+止まらない。止まるのは、覚えた時間の切れた token と初めて見る token だけである。
+ServiceAccount を消すと、最大で `--serviceaccount-token-ttl` のあいだはまだ通る。
+
+audience に API サーバ自身の audience（Pod に既定で mount される token のもの）を
+指定してはならない。クラスター中のどの Pod も、何もせずに自分の ServiceAccount
+として通れるようになる。gated 専用の値（例えば `https://<--auth-host>`）にする。
+
+`AccessToken` の `spec.subject` に `system:serviceaccount:` は書けない。長命の
+トークンで ServiceAccount を名乗らせないためである。
+
 ## 複数レプリカ
 
 複数レプリカで動かせる。レプリカ間で直接やりとりする経路は無く、共有するものは
@@ -610,6 +671,15 @@ Google は OIDC で、ID トークンの `email_verified` が真であること�
 | `gated_certificate_not_after_timestamp_seconds` | gauge | `namespace`, `secret`, `host` |
 | `gated_certificate_renewal_failures` | gauge | `namespace`, `secret` |
 | `gated_networkrole_target_resolved` | gauge (0/1) | `namespace`, `name` |
+| `gated_serviceaccount_tokens_total` | counter | `result` |
+| `gated_serviceaccount_token_reviews_total` | counter | `result` |
+
+`gated_serviceaccount_tokens_total` は提示された ServiceAccount の token を数える。
+`result` は `accepted` / `wrong_audience` / `expired` / `rejected` /
+`not_serviceaccount` / `review_failed` のいずれかである。
+`gated_serviceaccount_token_reviews_total` は API サーバへ実際に送った TokenReview を、
+`authenticated` / `unauthenticated` / `error` で数える。受け付けなかった理由は
+`--zap-log-level=debug` でログにも出る。token の値はどこにも書かない（ADR 0039）。
 
 ラベルにパス・クライアントアドレス・主体を入れない。値の種類に上限が無く、時系列が
 際限なく増えるためである。ホスト名も入れない。例外は証明書の期限だけで、証明書は
@@ -626,7 +696,7 @@ alert はレプリカをまたいで読むことになる。対象が消えた�
 
 一通り実装が入っている。CRD の定義、起動設定、Ingress のルーティング、TLS 終端、
 ACME による証明書の取得と更新、リーダー選出、認可、認証、`AccessToken`、
-バックエンドへの主体の伝達、および
+ServiceAccount の token による認証、バックエンドへの主体の伝達、および
 gated 自身を動かすための manifest である。
 
 ゴールの4項目は kind 上の E2E（`make test-e2e`）で通しで確かめている。
@@ -640,6 +710,10 @@ gated 自身を動かすための manifest である。
    パスワード欄の双方で通る
 4. 複数レプリカで動かしても証明書の発行は重複せず、どのレプリカに届いても
    ACME チャレンジに応答できる
+
+加えて、API サーバが発行した ServiceAccount の token が TokenReview で確かめられ、
+許された ServiceAccount は通り、許されていない ServiceAccount は 403 になり、
+別の audience の token はバックエンドへそのまま届くことも確かめている。
 
 未実装なのは、`NetworkGroup`（ADR 0002）、DNS-01 solver（ADR 0005）、
 Gateway API の HTTPRoute 対応（ADR 0001）である。いずれも今回の範囲外として

@@ -50,7 +50,9 @@ spec:
             # contact, the central authentication host, the identity provider
             # clients — have no defaults on purpose (ADR 0009) and are added
             # by an overlay. Without them gated refuses to start and says
-            # which flag is missing.
+            # which flag is missing. So is --serviceaccount-audience, which
+            # gated starts without: ServiceAccount tokens are then not
+            # accepted at all (ADR 0039).
             - --ingress-class=gated
             - --http-addr=:8080
             - --https-addr=:8443

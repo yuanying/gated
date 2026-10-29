@@ -107,6 +107,20 @@ spec:
 `,
 		},
 		{
+			// A long-lived token must not be able to pass for a
+			// ServiceAccount, whose own tokens are short-lived and
+			// vouched for by the API server (ADR 0039).
+			name: "a service account subject",
+			manifest: `
+apiVersion: gate.unstable.cloud/v1alpha1
+kind: AccessToken
+metadata:
+  name: service-account
+spec:
+  subject: system:serviceaccount:natsumi:assistant
+`,
+		},
+		{
 			name: "a subject without a provider prefix",
 			manifest: `
 apiVersion: gate.unstable.cloud/v1alpha1
