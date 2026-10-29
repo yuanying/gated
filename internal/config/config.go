@@ -108,6 +108,21 @@ type Auth struct {
 
 	GitHub GitHubClient
 	Google GoogleClient
+
+	ServiceAccount ServiceAccount
+}
+
+// ServiceAccount configures the door Kubernetes ServiceAccount tokens come in
+// through (ADR 0039).
+type ServiceAccount struct {
+	// Audience is the one audience a token must have been minted for to
+	// be believed. It names a deployment, so it has no default; leaving it
+	// empty leaves the door shut.
+	Audience string
+	// TokenTTL is how long the API server's answer about a token is
+	// remembered. An accepted token is never remembered past its own
+	// expiry.
+	TokenTTL time.Duration
 }
 
 // GitHubClient is the GitHub OAuth application and the deployment of GitHub it
@@ -177,6 +192,11 @@ func Default() Config {
 				APIURL:  connector.DefaultGitHubAPIURL,
 			},
 			Google: GoogleClient{Issuer: connector.DefaultGoogleIssuer},
+			// Short enough that a deleted ServiceAccount stops
+			// working within a minute, long enough that a caller
+			// making a request a second costs the API server one
+			// review a minute.
+			ServiceAccount: ServiceAccount{TokenTTL: time.Minute},
 		},
 		LeaderElection: LeaderElection{
 			Enabled:       true,
@@ -236,6 +256,11 @@ func (c *Config) AddFlags(fs *flag.FlagSet) {
 		"Secret entry holding the Google OAuth client secret, as namespace/name/key.")
 	fs.StringVar(&c.Auth.Google.Issuer, "google-issuer", c.Auth.Google.Issuer,
 		"OpenID Connect issuer of the Google accounts to accept.")
+
+	fs.StringVar(&c.Auth.ServiceAccount.Audience, "serviceaccount-audience", c.Auth.ServiceAccount.Audience,
+		"Audience a Kubernetes ServiceAccount token must be minted for to be accepted as a bearer credential, checked with a TokenReview. Empty accepts none.")
+	fs.DurationVar(&c.Auth.ServiceAccount.TokenTTL, "serviceaccount-token-ttl", c.Auth.ServiceAccount.TokenTTL,
+		"How long the API server's answer about a ServiceAccount token is remembered. Never past the token's own expiry.")
 
 	fs.Var(&c.Publish.Services, "publish-service",
 		"Service whose external addresses are written into the status of the Ingresses gated is responsible for, as namespace/name. Repeatable.")

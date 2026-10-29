@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
@@ -150,6 +151,16 @@ func (c Config) validateAuth(report reportFunc) {
 
 	if c.Auth.SessionTTL <= 0 {
 		report("session-ttl", "must be positive")
+	}
+
+	// Any string is an audience, so there is little to check. Whitespace is
+	// the one thing that is never meant: it is two audiences written where
+	// gated accepts one.
+	if strings.ContainsFunc(c.Auth.ServiceAccount.Audience, unicode.IsSpace) {
+		report("serviceaccount-audience", "%q must be a single audience", c.Auth.ServiceAccount.Audience)
+	}
+	if c.Auth.ServiceAccount.TokenTTL <= 0 {
+		report("serviceaccount-token-ttl", "must be positive")
 	}
 
 	// Every protected host that is not world-readable ends in a redirect to

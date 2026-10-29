@@ -44,6 +44,7 @@ import (
 	"github.com/yuanying/gated/internal/config"
 	"github.com/yuanying/gated/internal/controller"
 	"github.com/yuanying/gated/internal/proxy"
+	"github.com/yuanying/gated/internal/serviceaccount"
 )
 
 // gracefulShutdownTimeout is how long the manager waits for its runnables to
@@ -143,6 +144,7 @@ func run(args []string) error {
 		"httpAddr", cfg.HTTPAddr,
 		"httpsAddr", cfg.HTTPSAddr,
 		"authHost", cfg.Auth.Host,
+		"serviceAccountAudience", cfg.Auth.ServiceAccount.Audience,
 		"leaderElection", cfg.LeaderElection.Enabled,
 	)
 
@@ -314,11 +316,22 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		return err
 	}
 
+	// A third door, for workloads in the cluster, opened only when an
+	// audience is named for it (ADR 0039). Its tokens and AccessTokens
+	// are told apart by their shape, so the two never read each other's.
+	middleware := tokens.Wrap
+	subjects := proxy.SubjectResolvers{tokens}
+	if serviceAccounts := setupServiceAccounts(mgr, cfg, log); serviceAccounts != nil {
+		middleware = func(next http.Handler) http.Handler { return tokens.Wrap(serviceAccounts.Wrap(next)) }
+		subjects = append(subjects, serviceAccounts)
+	}
+	subjects = append(subjects, sessions)
+
 	decision := &proxy.Authorization{
 		Policies: policies,
 		// Asked in this order because a token is presented on purpose
 		// and a cookie is sent whether or not anybody meant it to be.
-		Subjects: proxy.SubjectResolvers{tokens, sessions},
+		Subjects: subjects,
 		AuthHost: cfg.Auth.Host,
 		// Ties the token a completed login hands back to the browser
 		// that started it.
@@ -346,7 +359,7 @@ func setupDataPlane(mgr ctrl.Manager, cfg config.Config, challenges http01.Sourc
 		// the first and not the second, and is still recorded against
 		// the Ingress it was aimed at (ADR 0031).
 		Middleware: func(next http.Handler) http.Handler {
-			return proxy.Observe(tokens.Wrap(decision.Wrap(proxy.Observe(next))))
+			return proxy.Observe(middleware(decision.Wrap(proxy.Observe(next))))
 		},
 		Log: log.WithName("proxy"),
 	}
@@ -648,6 +661,25 @@ func setupTokenSet(mgr ctrl.Manager, log logr.Logger) (*accesstoken.Authenticato
 		Usage:  uses,
 		Log:    log.WithName("accesstoken"),
 	}, nil
+}
+
+// setupServiceAccounts wires the door ServiceAccount tokens come in through,
+// or returns nil when no audience is named for it (ADR 0039).
+//
+// It runs on every replica and holds nothing a replica would have to read
+// before it is ready: what it remembers it learnt from the API server one
+// token at a time, and a replica that has learnt nothing yet asks.
+func setupServiceAccounts(mgr ctrl.Manager, cfg config.Config, log logr.Logger) *serviceaccount.Authenticator {
+	if cfg.Auth.ServiceAccount.Audience == "" {
+		return nil
+	}
+	return &serviceaccount.Authenticator{
+		Audience: cfg.Auth.ServiceAccount.Audience,
+		Reviewer: &controller.TokenReviewer{Client: mgr.GetClient()},
+		TTL:      cfg.Auth.ServiceAccount.TokenTTL,
+		Metrics:  serviceaccount.NewMetrics(ctrlmetrics.Registry),
+		Log:      log.WithName("serviceaccount"),
+	}
 }
 
 // setupAccessTokens wires the reconciler that mints tokens.
