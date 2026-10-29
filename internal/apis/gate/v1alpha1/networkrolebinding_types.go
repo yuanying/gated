@@ -28,12 +28,13 @@ type Subject struct {
 	Kind SubjectKind `json:"kind,omitempty"`
 
 	// name of the principal: github:<login>, google:<mail address>,
-	// system:authenticated or system:unauthenticated.
+	// system:authenticated, system:unauthenticated or
+	// system:serviceaccount:<namespace>:<name>.
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^(github:[A-Za-z0-9][A-Za-z0-9-]{0,38}|google:[^@\s]+@[^@\s]+\.[^@\s]+|system:(authenticated|unauthenticated))$`
+	// +kubebuilder:validation:Pattern=`^(github:[A-Za-z0-9][A-Za-z0-9-]{0,38}|google:[^@\s]+@[^@\s]+\.[^@\s]+|system:(authenticated|unauthenticated)|system:serviceaccount:[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?:[a-z0-9]([-a-z0-9.]*[a-z0-9])?)$`
 	Name string `json:"name"`
 }
 

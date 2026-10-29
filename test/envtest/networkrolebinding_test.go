@@ -51,6 +51,10 @@ spec:
       name: system:authenticated
     - kind: User
       name: system:unauthenticated
+    - kind: User
+      name: system:serviceaccount:natsumi:assistant
+    - kind: User
+      name: system:serviceaccount:release-lag:release-lag.v2
 `)
 }
 
@@ -172,6 +176,50 @@ spec:
     name: minimal
   subjects:
     - name: system:masters
+`,
+		},
+		{
+			// The group of every ServiceAccount in a namespace is
+			// not a subject gated has (ADR 0002, ADR 0039).
+			name: "the service accounts of a namespace",
+			manifest: `
+apiVersion: gate.unstable.cloud/v1alpha1
+kind: NetworkRoleBinding
+metadata:
+  name: serviceaccounts-group
+spec:
+  roleRef:
+    name: minimal
+  subjects:
+    - name: system:serviceaccounts:natsumi
+`,
+		},
+		{
+			name: "a service account without a name",
+			manifest: `
+apiVersion: gate.unstable.cloud/v1alpha1
+kind: NetworkRoleBinding
+metadata:
+  name: serviceaccount-no-name
+spec:
+  roleRef:
+    name: minimal
+  subjects:
+    - name: system:serviceaccount:natsumi
+`,
+		},
+		{
+			name: "a service account in a namespace that cannot exist",
+			manifest: `
+apiVersion: gate.unstable.cloud/v1alpha1
+kind: NetworkRoleBinding
+metadata:
+  name: serviceaccount-bad-namespace
+spec:
+  roleRef:
+    name: minimal
+  subjects:
+    - name: system:serviceaccount:Natsumi:assistant
 `,
 		},
 		{
