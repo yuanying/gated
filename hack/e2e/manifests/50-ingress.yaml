@@ -102,3 +102,27 @@ spec:
                 name: backend
                 port:
                   number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  # The one ServiceAccount tokens run against (ADR 0039).
+  name: serviceaccount
+  namespace: gated-e2e
+spec:
+  ingressClassName: gated
+  tls:
+    - hosts:
+        - serviceaccount.example.com
+      secretName: serviceaccount-tls
+  rules:
+    - host: serviceaccount.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
