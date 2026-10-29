@@ -2,6 +2,7 @@
 
 - Date: 2026-08-21
 - Updated: 2026-08-22（`gate.unstable.cloud` への書き込み権限が何を意味するかを、信頼境界として明記した。決定は変えていない）
+- Updated: 2026-10-29（ServiceAccount の主体 `system:serviceaccount:<namespace>:<name>` を足した。ADR 0039）
 - Status: Accepted
 
 ## Context
@@ -51,10 +52,11 @@
 | `google:<メールアドレス>` | Google の特定アカウント |
 | `system:authenticated` | ログイン済みであれば誰でも |
 | `system:unauthenticated` | 未ログインを含む誰でも |
+| `system:serviceaccount:<namespace>:<name>` | Kubernetes の特定の ServiceAccount（ADR 0039） |
 
-`system:` で始まる2つは RBAC から語彙を借りた仮想的な主体である。「誰でも読めるが書けるのは自分だけ」は、GET のみを許す `NetworkRole` を `system:unauthenticated` に、全メソッドを許す `NetworkRole` を特定のアカウントに、それぞれ束ねることで表現する。
+`system:authenticated` と `system:unauthenticated` は RBAC から語彙を借りた仮想的な主体である。`system:serviceaccount:` は仮想の主体ではなく、1つの ServiceAccount を指す。綴りは RBAC と TokenReview が使うものと同じにしてあり、API サーバが確かめた ServiceAccount の token で決まる（ADR 0039）。`system:authenticated` は、gated の audience の token を持つ ServiceAccount も含む。「誰でも読めるが書けるのは自分だけ」は、GET のみを許す `NetworkRole` を `system:unauthenticated` に、全メソッドを許す `NetworkRole` を特定のアカウントに、それぞれ束ねることで表現する。
 
-グループは当面導入しない。実質的な利用者が一人であり、メンバー集合を使い回す必要が出ていないためである。必要になった時点で `NetworkGroup` CRD を追加し、`subjects` に `kind: Group` を足す。
+グループは当面導入しない。namespace 単位の ServiceAccount のグループ（`system:serviceaccounts:<namespace>`）も同じである。実質的な利用者が一人であり、メンバー集合を使い回す必要が出ていないためである。必要になった時点で `NetworkGroup` CRD を追加し、`subjects` に `kind: Group` を足す。
 
 ### 拒否されたときの挙動
 
@@ -104,3 +106,4 @@ fail-open を選んだため、`targetRef` の namespace や name を打ち間�
 - [[0003-authentication-and-session]] — 主体をどう識別するか
 - [[0004-access-token-for-non-browser-clients]] — ブラウザ以外の主体
 - [[0007-test-strategy]] — 判定を純関数として検証する
+- [[0039-serviceaccount-subject-and-tokenreview]] — ServiceAccount を主体にすること

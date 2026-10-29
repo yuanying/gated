@@ -1,6 +1,7 @@
 # 0010. CRD スキーマでどこまで弾くか
 
 - Date: 2026-08-21
+- Updated: 2026-10-29（`NetworkRoleBinding` の主体に ServiceAccount を足し、`AccessToken` には名乗らせないことを書いた。ADR 0039）
 - Status: Accepted
 
 ## Context
@@ -29,6 +30,8 @@ CRD のスキーマは、この種の誤りを admission の時点で弾ける�
 
 `AccessToken` の `spec.subject` は `github:` と `google:` のみを受け付ける。トークンは誰かに属している必要があり、「誰でも」として振る舞うトークンは、そのトークンを持つ者に匿名アクセスと同じものしか与えない。意味を持たない設定は書けないほうがよい。
 
+`NetworkRoleBinding` の主体には `system:serviceaccount:<namespace>:<name>` も書ける（ADR 0039）。namespace は DNS-1123 label、name は DNS-1123 subdomain の形に限る。`AccessToken` はこれも受け付けない。長命のトークンで、API サーバが発行し取り消せる ServiceAccount の token の代わりをさせないためである。
+
 ### スキーマでは既定値を埋めない範囲
 
 `targetRef.namespace` と `AccessToken` の `spec.secretName` には CRD の default を置かない。どちらも「省略時はリソース自身の namespace / 名前」という規則であり、これはリソースごとに違う値になるため、スキーマの default では表現できない。コントローラ側の解決規則として実装する。
@@ -48,3 +51,4 @@ CRD のスキーマは、この種の誤りを admission の時点で弾ける�
 - [[0002-authorization-model]] — fail-open と主体の語彙
 - [[0004-access-token-for-non-browser-clients]] — トークンが属する主体
 - [[0007-test-strategy]] — スキーマを envtest で検証する方針
+- [[0039-serviceaccount-subject-and-tokenreview]] — ServiceAccount の主体の綴り
