@@ -358,3 +358,140 @@ func TestServersCloseAnIdleConnection(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// slowAnswer starts a backend that reads the whole request body and then takes
+// its time to answer: it waits for pause before the headers when headersFirst
+// is false, and between the headers and the rest of the body when it is true.
+// It reports whether the request it was forwarded was cancelled while it
+// waited.
+//
+// Only a request for slowAnswerPath is answered and reported. A loopback port
+// is reused across the machine, and whatever else still has the old address
+// can reach this backend; reporting its requests too would fill the channel
+// and leave the one under test waiting.
+func slowAnswer(t *testing.T, pause time.Duration, headersFirst bool) (addr string, cancelled <-chan bool) {
+	t.Helper()
+	ch := make(chan bool, 1)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != slowAnswerPath {
+			http.NotFound(w, r)
+			return
+		}
+		if _, err := io.ReadAll(r.Body); err != nil {
+			http.Error(w, "the body stopped", http.StatusBadRequest)
+			return
+		}
+		if headersFirst {
+			io.WriteString(w, "head ")
+			http.NewResponseController(w).Flush()
+		}
+		select {
+		case <-time.After(pause):
+		case <-r.Context().Done():
+			ch <- true
+			return
+		}
+		io.WriteString(w, "tail")
+		ch <- false
+	}))
+	t.Cleanup(s.Close)
+	return addressOf(t, s), ch
+}
+
+// slowAnswerPath is the path slowAnswer answers on.
+const slowAnswerPath = "/slow-answer"
+
+func TestProxyKeepsWaitingForAnAnswerOnceTheBodyHasArrived(t *testing.T) {
+	// The read deadline times a read of the body, and once the body has
+	// been read there is nothing left for it to time (ADR 0030). Left
+	// standing, it runs out under the read the server keeps on the
+	// connection to notice a client hanging up, which then cancels the
+	// request: an answer slower than the deadline was cut off, however
+	// promptly the client had sent its body.
+	for _, tc := range []struct {
+		name         string
+		headersFirst bool
+		want         string
+	}{
+		{name: "before the headers", headersFirst: false, want: "tail"},
+		{name: "between the headers and the body", headersFirst: true, want: "head tail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backendAddr, cancelled := slowAnswer(t, pastTheDeadline, tc.headersFirst)
+			front := httptest.NewServer(&proxy.Handler{
+				Tables:          tableFor("app.example.com"),
+				Backends:        toAddress(backendAddr),
+				BodyReadTimeout: testDeadline,
+			})
+			defer front.Close()
+
+			req, _ := http.NewRequest(http.MethodPost, front.URL+slowAnswerPath, strings.NewReader("question"))
+			req.Host = "app.example.com"
+			resp, err := front.Client().Do(req)
+			if err != nil {
+				t.Fatalf("Do() = %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Errorf("reading the answer: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("answer = %q, want %q", got, tc.want)
+			}
+
+			select {
+			case c := <-cancelled:
+				if c {
+					t.Error("the forwarded request was cancelled while the backend took its time")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the backend never finished answering")
+			}
+		})
+	}
+}
+
+func TestProxyKeepsWaitingForAnAnswerOnceTheBodyHasArrivedOverHTTP2(t *testing.T) {
+	// HTTP/2 runs no read of its own once a stream's body is in, so a
+	// deadline left standing has nothing to fail. This holds the
+	// behaviour there to the same expectation as over HTTP/1.
+	backendAddr, cancelled := slowAnswer(t, pastTheDeadline, true)
+	front := httptest.NewUnstartedServer(&proxy.Handler{
+		Tables:          tableFor("app.example.com"),
+		Backends:        toAddress(backendAddr),
+		BodyReadTimeout: testDeadline,
+	})
+	front.EnableHTTP2 = true
+	front.StartTLS()
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+slowAnswerPath, strings.NewReader("question"))
+	req.Host = "app.example.com"
+	resp, err := front.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do() = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("the request went out over HTTP/%d, want HTTP/2", resp.ProtoMajor)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Errorf("reading the answer: %v", err)
+	}
+	if string(got) != "head tail" {
+		t.Errorf("answer = %q, want %q", got, "head tail")
+	}
+	select {
+	case c := <-cancelled:
+		if c {
+			t.Error("the forwarded request was cancelled while the backend took its time")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the backend never finished answering")
+	}
+}

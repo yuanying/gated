@@ -82,7 +82,14 @@ func transferFromContext(ctx context.Context) (*transfer, bool) {
 	return t, ok
 }
 
-// deadlineBody renews the read deadline before every read of a client's body.
+// deadlineBody renews the read deadline before every read of a client's body,
+// and takes it off once the body has been read.
+//
+// The deadline is for the reads of the body and for nothing after them. The
+// HTTP/1 server goes on reading the connection once a body is in, to notice
+// the client hanging up, and a deadline left standing would run out under that
+// read and cancel the request: a backend that took longer to answer than the
+// deadline would have its answer cut off midway (ADR 0030).
 type deadlineBody struct {
 	io.ReadCloser
 	rc      *http.ResponseController
@@ -96,10 +103,24 @@ func (b *deadlineBody) Read(p []byte) (int, error) {
 	// not made worse by being unbounded.
 	_ = b.rc.SetReadDeadline(time.Now().Add(b.timeout))
 	n, err := b.ReadCloser.Read(p)
-	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
-		b.state.bodyTimedOut.Store(true)
+	if err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			b.state.bodyTimedOut.Store(true)
+		}
+		// io.EOF or not, there are no more reads of this body to time.
+		_ = b.rc.SetReadDeadline(time.Time{})
 	}
 	return n, err
+}
+
+// Close takes the deadline off as Read does at the end of the body. Closing a
+// body that has not been read to the end makes the server read what is left of
+// it, under the deadline the last read set, and then start the same read of the
+// connection that a body read to the end does.
+func (b *deadlineBody) Close() error {
+	err := b.ReadCloser.Close()
+	_ = b.rc.SetReadDeadline(time.Time{})
+	return err
 }
 
 // deadlineWriter renews the write deadline before every write to a client.
