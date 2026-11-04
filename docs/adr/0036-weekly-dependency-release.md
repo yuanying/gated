@@ -1,6 +1,7 @@
 # 0036. 依存の更新だけの週は、パッチ版を機械が出す
 
 - Date: 2026-10-21
+- Updated: 2026-11-04（Decision「パッチ・ダイジェスト・pin の更新は Renovate がマージする」を ADR 0040 で置き換えた）
 - Status: Accepted
 
 ## Context
@@ -16,6 +17,8 @@ gated は fraction-agents・natsumi などと同じ Renovate の GitHub App で�
 ## Decision
 
 ### パッチ・ダイジェスト・pin の更新は Renovate がマージする
+
+> この項は ADR 0040 で置き換えた。更新は、コードオーナーの承認とチェックが揃ったときに GitHub の auto-merge がマージする。以下は置き換える前の決定として残す。
 
 更新の種類がパッチ版、ダイジェスト、pin（`pin` と `pinDigest`）のものは、PR のチェックがすべて通ったら Renovate 自身がマージする。マイナー版とメジャー版は PR を開くだけで、従来どおり人がマージする。グループの PR は、含まれる更新がすべて自動マージの対象であるときだけ自動でマージされる。kubernetes monorepo のグループにマイナー版が1つでも入れば、そのグループは人が見る。
 
@@ -82,3 +85,4 @@ Go の tool ディレクティブだけの更新も `go.mod` を変えるので�
 - [[0007-test-strategy]] — 判定を純関数としてユニットテストで固める
 - [[0025-live-verification-against-a-real-authority]] — CI に入らない層。自動でマージされた更新が見逃しうる範囲
 - [[0038-release-on-a-vulnerability-fix]] — 判定の対象に脆弱性対応の係の bot を足し、係の PR のマージをリリースのきっかけに加えた
+- [[0040-merge-dependency-updates-on-code-owner-approval]] — Decision「パッチ・ダイジェスト・pin の更新は Renovate がマージする」を置き換えた。更新はコードオーナーの承認で GitHub がマージする
