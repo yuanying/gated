@@ -1,9 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "The patch, digest and pinning updates Renovate merges wait for every check on the pull request. ci.yml runs on every pull request with no path filter, so that is every layer short of the live one, the generated artifacts and tidiness included (ADR 0026). A week of nothing but these merges is what the weekly release workflow releases as a patch version (ADR 0036)",
+  "description": "Every update gets GitHub's auto-merge through platform-automerge, and the ruleset on main holds it until a code owner in .github/CODEOWNERS approves it and every check on the pull request passes (ADR 0040). ci.yml runs on every pull request with no path filter, so that is every layer short of the live one, the generated artifacts and tidiness included (ADR 0026). A week of nothing but Renovate's commits is what the weekly release workflow releases as a patch version (ADR 0036)",
   "extends": [
     "github>yuanying/renovate-config",
-    "github>yuanying/renovate-config:automerge-patch"
+    "github>yuanying/renovate-config:platform-automerge"
   ],
   "postUpdateOptions": ["gomodTidy"],
   "kubernetes": {
