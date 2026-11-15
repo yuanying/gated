@@ -11,6 +11,7 @@ package policy
 import (
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -50,6 +51,41 @@ func TargetKey(role *gatev1alpha1.NetworkRole) (types.NamespacedName, bool) {
 		namespace = role.Namespace
 	}
 	return types.NamespacedName{Namespace: namespace, Name: ref.Name}, true
+}
+
+// FailsClosed reports whether a namespace closes the default for the Ingresses
+// in it (ADR 0041). Only the one documented value closes: reading "True" or
+// "yes" as well would make what closes a namespace a matter of gated's
+// implementation, and whoever writes namespaces could no longer check it.
+func FailsClosed(ns *corev1.Namespace) bool {
+	if ns == nil {
+		return false
+	}
+	return ns.Labels[gatev1alpha1.LabelFailClosed] == gatev1alpha1.LabelFailClosedValue
+}
+
+// ClosedNamespaces lists, sorted, the names of the namespaces that fail closed.
+func ClosedNamespaces(namespaces []corev1.Namespace) []string {
+	var out []string
+	for i := range namespaces {
+		if FailsClosed(&namespaces[i]) {
+			out = append(out, namespaces[i].Name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// NamesTarget reports whether any of the roles names the given Ingress in a
+// form gated can resolve, wherever the role itself lives. Whether the Ingress
+// exists is the caller's to know; this only reads the references.
+func NamesTarget(roles []gatev1alpha1.NetworkRole, target types.NamespacedName) bool {
+	for i := range roles {
+		if key, ok := TargetKey(&roles[i]); ok && key == target {
+			return true
+		}
+	}
+	return false
 }
 
 // Hosts lists the hostnames a resolved target serves, in the form they were

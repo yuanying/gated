@@ -89,6 +89,7 @@ func TestAServiceAccountIsAuthorisedLikeAnybodyElse(t *testing.T) {
 		[]authz.Role{roleFor("natsumi", "api")},
 		// The subject is written the way RBAC writes it.
 		[]authz.Binding{{Namespace: "natsumi", RoleName: "api", Subjects: []string{allowedSA, tokenUser}}},
+		nil,
 	))
 
 	allowed := serviceAccountToken(t, saAudience, "assistant")

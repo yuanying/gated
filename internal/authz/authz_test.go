@@ -403,7 +403,7 @@ func TestEvaluate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			policies := authz.BuildPolicySet(tc.roles, tc.bindings)
+			policies := authz.BuildPolicySet(tc.roles, tc.bindings, nil)
 			if got := policies.Evaluate(tc.req); got != tc.want {
 				t.Errorf("Evaluate(%+v) = %v, want %v", tc.req, got, tc.want)
 			}
@@ -439,7 +439,7 @@ func TestEvaluateDoesNotDependOnOrder(t *testing.T) {
 	}
 
 	want := make([]authz.Decision, len(requests))
-	base := authz.BuildPolicySet(roles, bindings)
+	base := authz.BuildPolicySet(roles, bindings, nil)
 	for i, req := range requests {
 		want[i] = base.Evaluate(req)
 	}
@@ -451,7 +451,7 @@ func TestEvaluateDoesNotDependOnOrder(t *testing.T) {
 			shuffledRoles[to] = roles[from]
 			shuffledBindings[to] = bindings[from]
 		}
-		policies := authz.BuildPolicySet(shuffledRoles, shuffledBindings)
+		policies := authz.BuildPolicySet(shuffledRoles, shuffledBindings, nil)
 		for i, req := range requests {
 			if got := policies.Evaluate(req); got != want[i] {
 				t.Fatalf("order %v: Evaluate(%+v) = %v, want %v", perm, req, got, want[i])
@@ -487,6 +487,7 @@ func TestProtects(t *testing.T) {
 			{Namespace: "shop", Name: "broken", Rules: []authz.Rule{rule([]string{"*"}, []string{"*"})}},
 		},
 		[]authz.Binding{bind("shop", "owner", octocat)},
+		nil,
 	)
 
 	if !policies.Protects(shop) {
@@ -521,7 +522,7 @@ func TestBuildPolicySetCopiesItsInput(t *testing.T) {
 	roles := []authz.Role{role("public", shop, rules...)}
 	bindings := []authz.Binding{bind("shop", "public", "system:unauthenticated")}
 
-	policies := authz.BuildPolicySet(roles, bindings)
+	policies := authz.BuildPolicySet(roles, bindings, nil)
 	if got := policies.Evaluate(request("", "GET", "/", shop)); got != authz.Allow {
 		t.Fatalf("Evaluate() = %v, want %v", got, authz.Allow)
 	}
@@ -547,5 +548,138 @@ func TestDecisionString(t *testing.T) {
 		if got := tc.decision.String(); got != tc.want {
 			t.Errorf("Decision(%d).String() = %q, want %q", tc.decision, got, tc.want)
 		}
+	}
+}
+
+// TestEvaluateInAClosedNamespace covers ADR 0041: in a namespace labelled to
+// fail closed, a resource no role names is treated as protected with nothing
+// granted, and everything else is evaluated as usual.
+func TestEvaluateInAClosedNamespace(t *testing.T) {
+	lab := authz.ResourceRef{Namespace: "lab", Name: "toy"}
+	closed := []string{"lab"}
+
+	tests := []struct {
+		name     string
+		roles    []authz.Role
+		bindings []authz.Binding
+		closed   []string
+		req      authz.Request
+		want     authz.Decision
+	}{
+		{
+			// Logging in would not help: nobody is granted anything.
+			name:   "an anonymous caller is refused, not offered a login",
+			closed: closed,
+			req:    request("", "GET", "/", lab),
+			want:   authz.Deny,
+		},
+		{
+			name:   "a logged-in caller is refused",
+			closed: closed,
+			req:    request(octocat, "GET", "/", lab),
+			want:   authz.Deny,
+		},
+		{
+			name:     "a role that names the resource is evaluated as usual",
+			roles:    []authz.Role{role("public", lab, rule([]string{"*"}, []string{"GET"}))},
+			bindings: []authz.Binding{bind("lab", "public", authz.SubjectUnauthenticated)},
+			closed:   closed,
+			req:      request("", "GET", "/", lab),
+			want:     authz.Allow,
+		},
+		{
+			name:     "a role that names the resource still offers a login",
+			roles:    []authz.Role{role("owner", lab, rule([]string{"*"}, []string{"*"}))},
+			bindings: []authz.Binding{bind("lab", "owner", octocat)},
+			closed:   closed,
+			req:      request("", "GET", "/", lab),
+			want:     authz.RequireLogin,
+		},
+		{
+			// The role lives elsewhere; it protects the resource all
+			// the same (ADR 0002).
+			name: "a role in another namespace counts",
+			roles: []authz.Role{{
+				Namespace: "ops", Name: "owner", Target: lab,
+				Rules: []authz.Rule{rule([]string{"*"}, []string{"*"})},
+			}},
+			bindings: []authz.Binding{bind("ops", "owner", octocat)},
+			closed:   closed,
+			req:      request(octocat, "GET", "/", lab),
+			want:     authz.Allow,
+		},
+		{
+			// An unresolved role protects nothing; in a closed
+			// namespace that means refused, not served.
+			name: "a role whose target did not resolve leaves it closed",
+			roles: []authz.Role{{
+				Namespace: "lab", Name: "typo",
+				Rules: []authz.Rule{rule([]string{"*"}, []string{"*"})},
+			}},
+			bindings: []authz.Binding{bind("lab", "typo", authz.SubjectUnauthenticated)},
+			closed:   closed,
+			req:      request("", "GET", "/", lab),
+			want:     authz.Deny,
+		},
+		{
+			name:   "a namespace that is not closed stays open",
+			closed: closed,
+			req:    request("", "GET", "/", shop),
+			want:   authz.Allow,
+		},
+		{
+			name:   "with no namespace closed, nothing changes",
+			closed: nil,
+			req:    request("", "GET", "/", lab),
+			want:   authz.Allow,
+		},
+		{
+			name:   "a request with no target is still not protected",
+			closed: []string{""},
+			req:    request("", "GET", "/", authz.ResourceRef{}),
+			want:   authz.Allow,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			policies := authz.BuildPolicySet(tc.roles, tc.bindings, tc.closed)
+			if got := policies.Evaluate(tc.req); got != tc.want {
+				t.Errorf("Evaluate(%+v) = %v, want %v", tc.req, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRefusedByDefault is what the proxy logs and the Event writer need to
+// know: whether a resource is refused only because its namespace fails closed
+// and no role names it.
+func TestRefusedByDefault(t *testing.T) {
+	lab := authz.ResourceRef{Namespace: "lab", Name: "toy"}
+	named := authz.ResourceRef{Namespace: "lab", Name: "named"}
+	policies := authz.BuildPolicySet(
+		[]authz.Role{role("owner", named, rule([]string{"*"}, []string{"*"}))},
+		nil,
+		[]string{"lab"},
+	)
+
+	if !policies.RefusedByDefault(lab) {
+		t.Error("RefusedByDefault(lab/toy) = false, want true: closed namespace, no role")
+	}
+	if policies.RefusedByDefault(named) {
+		t.Error("RefusedByDefault(lab/named) = true, want false: a role names it")
+	}
+	if policies.RefusedByDefault(shop) {
+		t.Error("RefusedByDefault(shop/storefront) = true, want false: the namespace is open")
+	}
+	if policies.RefusedByDefault(authz.ResourceRef{}) {
+		t.Error("RefusedByDefault(zero) = true, want false")
+	}
+	if policies.Protects(lab) {
+		t.Error("Protects(lab/toy) = true, want false: no role names it")
+	}
+	var none *authz.PolicySet
+	if none.RefusedByDefault(lab) {
+		t.Error("nil.RefusedByDefault() = true, want false")
 	}
 }

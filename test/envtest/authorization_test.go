@@ -96,6 +96,14 @@ func startAuthorization(t *testing.T, backendAddr string) *authorizationFixture 
 	if err := bindings.SetupWithManager(mgr); err != nil {
 		t.Fatalf("registering the NetworkRoleBinding controller: %v", err)
 	}
+	closed := &controller.FailClosedReconciler{
+		Reader:       mgr.GetCache(),
+		IngressClass: ingressClass,
+		Recorder:     mgr.GetEventRecorderFor("gated-authorization"),
+	}
+	if err := closed.SetupWithManager(mgr); err != nil {
+		t.Fatalf("registering the fail-closed controller: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -438,4 +446,80 @@ func hasEvent(t *testing.T, ns, name, reason string) bool {
 		}
 	}
 	return false
+}
+
+// labelNamespace sets or removes the fail-closed label (ADR 0041).
+func labelNamespace(t *testing.T, name string, closed bool) {
+	t.Helper()
+
+	var ns corev1.Namespace
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Name: name}, &ns); err != nil {
+		t.Fatalf("reading namespace %s: %v", name, err)
+	}
+	patch := client.MergeFrom(ns.DeepCopy())
+	if ns.Labels == nil {
+		ns.Labels = map[string]string{}
+	}
+	if closed {
+		ns.Labels[gatev1alpha1.LabelFailClosed] = gatev1alpha1.LabelFailClosedValue
+	} else {
+		delete(ns.Labels, gatev1alpha1.LabelFailClosed)
+	}
+	if err := k8sClient.Patch(context.Background(), &ns, patch); err != nil {
+		t.Fatalf("labelling namespace %s: %v", name, err)
+	}
+}
+
+// TestFailClosedNamespaceFollowsItsLabel walks one Ingress with no role
+// through ADR 0041: open, closed as soon as its namespace is labelled, opened
+// by a role, and open again once the label is removed.
+func TestFailClosedNamespaceFollowsItsLabel(t *testing.T) {
+	ns := newNamespace(t)
+	backendAddr := newBackend(t, "from the backend")
+	newService(t, ns, "web", 80, "http")
+	fixture := startAuthorization(t, backendAddr)
+
+	const host = "authz-fail-closed.example.com"
+	newProtectedIngress(t, ns, "toy", host)
+
+	waitFor(t, "the Ingress to be served without a role", func() bool {
+		return fixture.get(t, http.MethodGet, host, "/", "", browserAccept).StatusCode == http.StatusOK
+	})
+
+	labelNamespace(t, ns, true)
+	waitFor(t, "the label to close the Ingress", func() bool {
+		return fixture.get(t, http.MethodGet, host, "/", "", browserAccept).StatusCode == http.StatusForbidden
+	})
+	// Nobody could pass, so nobody is sent to log in or challenged.
+	if got := fixture.get(t, http.MethodGet, host, "/", "", clientAccept); got.StatusCode != http.StatusForbidden {
+		t.Errorf("status for a non-browser = %d, want %d", got.StatusCode, http.StatusForbidden)
+	}
+	if got := fixture.get(t, http.MethodGet, host, "/", "github:octocat", browserAccept); got.StatusCode != http.StatusForbidden {
+		t.Errorf("status for a logged-in caller = %d, want %d", got.StatusCode, http.StatusForbidden)
+	}
+	waitFor(t, "the refusal to be reported on the Ingress", func() bool {
+		return hasEvent(t, ns, "toy", "RefusedByDefault")
+	})
+
+	// A role opens it the usual way.
+	newNetworkRole(t, ns, "public", "toy", rule([]string{"*"}, "GET"))
+	newNetworkRoleBinding(t, ns, "everyone", "public", gatev1alpha1.SubjectUnauthenticated)
+	waitFor(t, "the role to open the Ingress", func() bool {
+		return fixture.get(t, http.MethodGet, host, "/", "", browserAccept).StatusCode == http.StatusOK
+	})
+	// A typo in a role does not open anything here.
+	role := &gatev1alpha1.NetworkRole{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "public"}}
+	if err := k8sClient.Delete(context.Background(), role); err != nil {
+		t.Fatalf("deleting the role: %v", err)
+	}
+	newNetworkRole(t, ns, "typo", "toi", rule([]string{"*"}, "GET"))
+	newNetworkRoleBinding(t, ns, "everyone-typo", "typo", gatev1alpha1.SubjectUnauthenticated)
+	waitFor(t, "an unresolved role to leave the Ingress closed", func() bool {
+		return fixture.get(t, http.MethodGet, host, "/", "", browserAccept).StatusCode == http.StatusForbidden
+	})
+
+	labelNamespace(t, ns, false)
+	waitFor(t, "removing the label to open the Ingress again", func() bool {
+		return fixture.get(t, http.MethodGet, host, "/", "", browserAccept).StatusCode == http.StatusOK
+	})
 }

@@ -123,7 +123,7 @@ func run(args []string) error {
 	if err := setupCertificates(mgr, cfg, challenges, observed, log); err != nil {
 		return err
 	}
-	if err := setupAuthorizationStatus(mgr, observed, log); err != nil {
+	if err := setupAuthorizationStatus(mgr, cfg, observed, log); err != nil {
 		return err
 	}
 	if err := setupIngressStatus(mgr, cfg, log); err != nil {
@@ -498,7 +498,7 @@ func setupIngressStatus(mgr ctrl.Manager, cfg config.Config, log logr.Logger) er
 // write is the same on all of them, so letting each replica write it would
 // multiply the writes and — worse — the events by the number of replicas,
 // without any replica learning anything the others did not (ADR 0006).
-func setupAuthorizationStatus(mgr ctrl.Manager, metrics *controller.Metrics, log logr.Logger) error {
+func setupAuthorizationStatus(mgr ctrl.Manager, cfg config.Config, metrics *controller.Metrics, log logr.Logger) error {
 	recorder := mgr.GetEventRecorderFor("gated-authorization")
 
 	roles := &controller.NetworkRoleReconciler{
@@ -520,6 +520,19 @@ func setupAuthorizationStatus(mgr ctrl.Manager, metrics *controller.Metrics, log
 	}
 	if err := bindings.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("registering the NetworkRoleBinding controller: %w", err)
+	}
+
+	// An Ingress in a namespace that fails closed, with no role naming
+	// it, is refused by every replica; the leader tells its author why
+	// (ADR 0041).
+	closed := &controller.FailClosedReconciler{
+		Reader:       mgr.GetCache(),
+		IngressClass: cfg.IngressClass,
+		Recorder:     recorder,
+		Log:          log.WithName("fail-closed"),
+	}
+	if err := closed.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("registering the fail-closed controller: %w", err)
 	}
 	return nil
 }

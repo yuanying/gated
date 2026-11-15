@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -248,7 +249,8 @@ func TestBuildFeedsTheDecision(t *testing.T) {
 		newBinding("shop", "owners", "owner", "github:octocat"),
 	}
 
-	policies := authz.BuildPolicySet(policy.Build(roles, bindings, ingresses))
+	builtRoles, builtBindings := policy.Build(roles, bindings, ingresses)
+	policies := authz.BuildPolicySet(builtRoles, builtBindings, nil)
 
 	target := authz.ResourceRef{Namespace: "shop", Name: "storefront"}
 	req := func(subject, method string) authz.Request {
@@ -267,5 +269,76 @@ func TestBuildFeedsTheDecision(t *testing.T) {
 		if got := policies.Evaluate(tc.req); got != tc.want {
 			t.Errorf("Evaluate(%s %s as %q) = %v, want %v", tc.req.Method, tc.req.Path, tc.req.Subject, got, tc.want)
 		}
+	}
+}
+
+func newNamespace(name string, labels map[string]string) corev1.Namespace {
+	return corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
+}
+
+// TestClosedNamespaces pins the contract of ADR 0041: only the value "true"
+// closes a namespace, so that whoever writes the namespace can check it.
+func TestClosedNamespaces(t *testing.T) {
+	label := gatev1alpha1.LabelFailClosed
+	namespaces := []corev1.Namespace{
+		newNamespace("zoo", map[string]string{label: "true"}),
+		newNamespace("lab", map[string]string{label: "true", "team": "agents"}),
+		newNamespace("capital", map[string]string{label: "True"}),
+		newNamespace("off", map[string]string{label: "false"}),
+		newNamespace("empty", map[string]string{label: ""}),
+		newNamespace("plain", nil),
+		newNamespace("other", map[string]string{"fail-closed": "true"}),
+	}
+
+	got := policy.ClosedNamespaces(namespaces)
+	want := []string{"lab", "zoo"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ClosedNamespaces() = %v, want %v", got, want)
+	}
+	if got := policy.ClosedNamespaces(nil); len(got) != 0 {
+		t.Errorf("ClosedNamespaces(nil) = %v, want empty", got)
+	}
+	if label != "gate.unstable.cloud/fail-closed" {
+		t.Errorf("LabelFailClosed = %q; the label is a contract with whoever writes namespaces", label)
+	}
+}
+
+func TestFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		labels map[string]string
+		want   bool
+	}{
+		{map[string]string{gatev1alpha1.LabelFailClosed: "true"}, true},
+		{map[string]string{gatev1alpha1.LabelFailClosed: "TRUE"}, false},
+		{map[string]string{gatev1alpha1.LabelFailClosed: "false"}, false},
+		{nil, false},
+	} {
+		ns := newNamespace("lab", tc.labels)
+		if got := policy.FailsClosed(&ns); got != tc.want {
+			t.Errorf("FailsClosed(%v) = %v, want %v", tc.labels, got, tc.want)
+		}
+	}
+	if policy.FailsClosed(nil) {
+		t.Error("FailsClosed(nil) = true, want false")
+	}
+}
+
+// TestNamesTarget is the question the Event writer asks about one Ingress: does
+// any role resolve to it, wherever that role lives.
+func TestNamesTarget(t *testing.T) {
+	toy := types.NamespacedName{Namespace: "lab", Name: "toy"}
+	roles := []gatev1alpha1.NetworkRole{
+		newRole("lab", "other", gatev1alpha1.TargetReference{Name: "other"}),
+		newRole("ops", "remote", gatev1alpha1.TargetReference{Namespace: "lab", Name: "toy"}),
+	}
+	if !policy.NamesTarget(roles, toy) {
+		t.Error("NamesTarget(remote role) = false, want true")
+	}
+	if policy.NamesTarget(roles[:1], toy) {
+		t.Error("NamesTarget(other) = true, want false")
+	}
+	unusable := newRole("lab", "svc", gatev1alpha1.TargetReference{Name: "toy", Kind: "Service"})
+	if policy.NamesTarget([]gatev1alpha1.NetworkRole{unusable}, toy) {
+		t.Error("NamesTarget(kind Service) = true, want false")
 	}
 }

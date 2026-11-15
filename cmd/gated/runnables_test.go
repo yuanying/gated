@@ -143,7 +143,7 @@ func leaderOnlySetups() map[string]setup {
 			return setupCertificates(mgr, cfg, challenges, nil, logr.Discard())
 		},
 		"setupAuthorizationStatus": func(mgr ctrl.Manager) error {
-			return setupAuthorizationStatus(mgr, nil, logr.Discard())
+			return setupAuthorizationStatus(mgr, testConfig(), nil, logr.Discard())
 		},
 		"setupAccessTokens": func(mgr ctrl.Manager) error {
 			return setupAccessTokens(mgr, logr.Discard())
