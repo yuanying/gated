@@ -29,7 +29,7 @@ var protectedIngress = routing.ResourceRef{Namespace: "shop", Name: "storefront"
 func policiesFor(t *testing.T, roles []authz.Role, bindings []authz.Binding) *proxy.PolicyStore {
 	t.Helper()
 	store := &proxy.PolicyStore{}
-	store.Store(authz.BuildPolicySet(roles, bindings))
+	store.Store(authz.BuildPolicySet(roles, bindings, nil))
 	return store
 }
 
@@ -202,7 +202,7 @@ func TestAuthorizationWithoutASnapshotRefuses(t *testing.T) {
 	if err := a.Policies.Ready(nil); err == nil {
 		t.Error("Ready() = nil before the first snapshot, want an error")
 	}
-	a.Policies.Store(authz.BuildPolicySet(nil, nil))
+	a.Policies.Store(authz.BuildPolicySet(nil, nil, nil))
 	if err := a.Policies.Ready(nil); err != nil {
 		t.Errorf("Ready() = %v after the first snapshot, want nil", err)
 	}
@@ -326,6 +326,39 @@ func TestWantsHTML(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := proxy.WantsHTML(tc.accept); got != tc.want {
 				t.Errorf("WantsHTML(%q) = %v, want %v", tc.accept, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAuthorizationRefusesInAClosedNamespace is ADR 0041 seen from the client:
+// nobody could pass, so nobody is sent to log in.
+func TestAuthorizationRefusesInAClosedNamespace(t *testing.T) {
+	store := &proxy.PolicyStore{}
+	store.Store(authz.BuildPolicySet(nil, nil, []string{protectedIngress.Namespace}))
+	a := &proxy.Authorization{Policies: store, AuthHost: "auth.example.com"}
+	match := &routing.Match{Ingress: protectedIngress}
+
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		subject string
+	}{
+		{name: "an anonymous browser", headers: browser},
+		{name: "an anonymous program", headers: apiClient},
+		{name: "a logged-in browser", headers: browser, subject: "github:octocat"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a.Subjects = staticSubject(tc.subject)
+			resp := serve(t, a, newRequest("GET", "/", tc.headers), match)
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", resp.StatusCode)
+			}
+			if loc := resp.Header.Get("Location"); loc != "" {
+				t.Errorf("Location = %q, want none", loc)
+			}
+			if got := resp.Header.Get("WWW-Authenticate"); got != "" {
+				t.Errorf("WWW-Authenticate = %q, want none", got)
 			}
 		})
 	}

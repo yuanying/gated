@@ -19,6 +19,13 @@ package controller
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch
 
+// Authorisation reads the labels of namespaces, because a namespace can close
+// the default for the Ingresses in it (ADR 0041). Reading only: whoever can
+// write a namespace decides whether it is closed, and gated must not be one of
+// them.
+//
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+
 // The address gated is reachable at is written back into the status of the
 // Ingresses it is responsible for (ADR 0032). The subresource only: the spec
 // belongs to whoever wrote the Ingress, and gated never edits it.

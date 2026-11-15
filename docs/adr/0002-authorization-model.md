@@ -3,6 +3,7 @@
 - Date: 2026-08-21
 - Updated: 2026-08-22（`gate.unstable.cloud` への書き込み権限が何を意味するかを、信頼境界として明記した。決定は変えていない）
 - Updated: 2026-10-29（ServiceAccount の主体 `system:serviceaccount:<namespace>:<name>` を足した。ADR 0039）
+- Updated: 2026-11-15（fail-open の既定を、ラベルで閉じた名前空間の外に限った。ADR 0041）
 - Status: Accepted
 
 ## Context
@@ -84,6 +85,8 @@ Gateway API の `ReferenceGrant` にあたる仕組み——指される側が�
 
 既定を拒否にする設計も考えられるが、それが妥当なのは保護が原則で公開が例外である場合に限られる。Ingress で公開するものは大半が公開を目的としたサービスであり、保護が必要なものは少数である。この比率で既定を拒否にすると、公開したい全 Ingress に「全員に許可する」という無意味なポリシーを書くことになり、ポリシーの存在自体が意味を持たなくなる。
 
+この既定は、ラベルで閉じた名前空間の Ingress には当てはまらない。そこでは `NetworkRole` の無い Ingress を誰も通さない（ADR 0041）。
+
 ## Consequences
 
 権限がアプリケーションの manifest から完全に分離される。上流が配布する Ingress をそのまま使いながら、権限だけを別リソースで後付けできる。権限の変更もアプリケーションに触れずに済む。
@@ -107,3 +110,4 @@ fail-open を選んだため、`targetRef` の namespace や name を打ち間�
 - [[0004-access-token-for-non-browser-clients]] — ブラウザ以外の主体
 - [[0007-test-strategy]] — 判定を純関数として検証する
 - [[0039-serviceaccount-subject-and-tokenreview]] — ServiceAccount を主体にすること
+- [[0041-fail-closed-namespace]] — 名前空間のラベルで、この既定を閉じる側に変える

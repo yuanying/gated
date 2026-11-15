@@ -74,6 +74,7 @@ func start(t *testing.T, subject string, connectors ...connector.Connector) *gat
 			{Namespace: "shop", RoleName: "storefront", Subjects: []string{subject}},
 			{Namespace: "wiki", RoleName: "notes", Subjects: []string{subject}},
 		},
+		nil,
 	))
 
 	keys := authn.StaticKey(sessionKey)

@@ -111,7 +111,8 @@ type Request struct {
 // can take an allow back (ADR 0002).
 //
 // A nil PolicySet protects nothing and allows everything, which is the same
-// answer it gives for a target no role names. The caller must therefore not
+// answer it gives for a target no role names outside a namespace that fails
+// closed (ADR 0041). The caller must therefore not
 // evaluate against a set that has not been built yet: "nothing is loaded" and
 // "nothing is protected" are the same value here, and telling them apart is
 // the job of whoever owns the snapshot.
@@ -121,6 +122,12 @@ func (p *PolicySet) Evaluate(req Request) Decision {
 	}
 	target, protected := p.targets[req.Target]
 	if !protected {
+		if p.closesNamespace(req.Target.Namespace) {
+			// ADR 0041: the namespace fails closed. Nobody is
+			// granted anything, so logging in would not help either;
+			// this is what a role bound to nobody answers.
+			return Deny
+		}
 		// ADR 0002: a resource no NetworkRole names is served without
 		// authentication. Defaulting to a refusal here would mean every
 		// public Ingress needed a policy saying "everyone", and a
@@ -164,6 +171,24 @@ func (p *PolicySet) Protects(ref ResourceRef) bool {
 		return false
 	}
 	_, ok := p.targets[ref]
+	return ok
+}
+
+// RefusedByDefault reports whether a resource is refused only because its
+// namespace fails closed and no role names it (ADR 0041). It is what a refusal
+// is logged with, and what the person who wrote the resource is told.
+func (p *PolicySet) RefusedByDefault(ref ResourceRef) bool {
+	if p == nil || ref.IsZero() {
+		return false
+	}
+	if _, ok := p.targets[ref]; ok {
+		return false
+	}
+	return p.closesNamespace(ref.Namespace)
+}
+
+func (p *PolicySet) closesNamespace(namespace string) bool {
+	_, ok := p.closed[namespace]
 	return ok
 }
 

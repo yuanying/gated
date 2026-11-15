@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -57,16 +58,25 @@ func (r *AuthorizationReconciler) Reconcile(ctx context.Context, _ reconcile.Req
 	if err := r.Reader.List(ctx, &ingresses); err != nil {
 		return ctrl.Result{}, err
 	}
+	// The namespace labels are part of the snapshot, not looked up per
+	// request: a snapshot that has arrived has read them, so there is no
+	// moment where a closed namespace is served open (ADR 0041).
+	var namespaces corev1.NamespaceList
+	if err := r.Reader.List(ctx, &namespaces); err != nil {
+		return ctrl.Result{}, err
+	}
+	closed := policy.ClosedNamespaces(namespaces.Items)
 
 	// Every Ingress is offered for resolution, not only the ones gated
 	// routes. A role pointing at somebody else's Ingress grants permissions
 	// on traffic that never arrives here, which is harmless; treating it as
 	// unresolved would instead report a hole that is not one.
-	r.Policies.Store(authz.BuildPolicySet(policy.Build(roles.Items, bindings.Items, ingresses.Items)))
+	builtRoles, builtBindings := policy.Build(roles.Items, bindings.Items, ingresses.Items)
+	r.Policies.Store(authz.BuildPolicySet(builtRoles, builtBindings, closed))
 
 	log := ctrl.LoggerFrom(ctx)
 	log.V(1).Info("authorisation policies rebuilt",
-		"roles", len(roles.Items), "bindings", len(bindings.Items))
+		"roles", len(roles.Items), "bindings", len(bindings.Items), "closedNamespaces", closed)
 	return ctrl.Result{}, nil
 }
 
@@ -86,6 +96,9 @@ func (r *AuthorizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// An Ingress appearing or going away changes which roles resolve,
 		// and so which resources are protected at all.
 		Watches(&networkingv1.Ingress{}, rebuild).
+		// A namespace gaining or losing the fail-closed label changes
+		// the default for every Ingress in it, at once (ADR 0041).
+		Watches(&corev1.Namespace{}, rebuild).
 		// A cluster where nobody has declared a role produces no
 		// watch event at all, and the snapshot gates readiness.
 		WatchesRawSource(startupSource{request: rebuildPolicies}).

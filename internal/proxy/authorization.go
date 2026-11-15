@@ -199,8 +199,16 @@ func (a *Authorization) Wrap(next http.Handler) http.Handler {
 		case authz.RequireLogin:
 			a.requireLogin(w, r)
 		default:
+			target := authz.ResourceRef{Namespace: match.Ingress.Namespace, Name: match.Ingress.Name}
+			reason := "not granted"
+			if policies.RefusedByDefault(target) {
+				// The body says nothing more than any other
+				// refusal: that a namespace fails closed is about
+				// the cluster, not for whoever is asking (ADR 0041).
+				reason = "no NetworkRole names this Ingress and its namespace fails closed"
+			}
 			a.Log.V(1).Info("refused", "host", r.Host, "path", r.URL.Path,
-				"method", r.Method, "subject", subject, "ingress", match.Ingress)
+				"method", r.Method, "subject", subject, "ingress", match.Ingress, "reason", reason)
 			http.Error(w, "you may not access this", http.StatusForbidden)
 		}
 	})

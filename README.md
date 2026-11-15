@@ -71,6 +71,7 @@ ClusterRole はコードの marker から生成される。`make generate` が
 |---|---|---|---|
 | `networking.k8s.io` | `ingresses` / `ingressclasses` | 読むだけ | ルーティングの入力 |
 | （コア） | `services` | 読むだけ | バックエンドの cluster IP を引く |
+| （コア） | `namespaces` | 読むだけ | 既定を閉じる名前空間のラベル（ADR 0041） |
 | （コア） | `secrets` | 読む・作る・更新する | 証明書、ACME アカウント鍵、チャレンジ、署名鍵、トークン |
 | （コア） | `events` | 作る・patch する | 発行の失敗や解決できない参照の通知 |
 | `coordination.k8s.io` | `leases` | 読む・作る・更新する | リーダー選出 |
@@ -467,7 +468,7 @@ audience の token を持つ ServiceAccount も含まれる。
 判定の規則は次の通り。
 
 - **どの `NetworkRole` からも参照されない Ingress は素通し**（fail-open）。公開が
-  原則で保護が例外だという前提に合わせてある
+  原則で保護が例外だという前提に合わせてある。ただし既定を閉じた名前空間は除く（後述）
 - 複数の宣言が重なった場合は**許可の和**。拒否の規則は持たず、評価順序に依存しない
 - `NetworkRole` を書いて `NetworkRoleBinding` を書かないと、その対象は誰にも開かない。
   保護は role から、許可は binding から来る（ADR 0017）
@@ -480,6 +481,33 @@ fail-open を選んでいるので、`targetRef` の書き間違いは「保護�
 `status.resolvedTargets` に、可否を `TargetResolved` condition に書き戻し、解決
 できなければ警告イベントも記録する。`NetworkRoleBinding` の `RoleResolved` も同じ
 である。`kubectl describe` で両方が読める。
+
+### 既定を閉じる名前空間
+
+名前空間にラベル `gate.unstable.cloud/fail-closed: "true"` を付けると、その名前空間の
+Ingress は既定で閉じる（ADR 0041）。信用の低い書き手（エージェントなど）に Ingress を
+書かせる名前空間で、`NetworkRole` の付け忘れがインターネットへの公開にならないように
+するためのものである。
+
+| 状況 | ラベルの無い名前空間 | 閉じた名前空間 |
+|---|---|---|
+| Ingress を指して解決した `NetworkRole` が無い | 素通し | 誰にも 403。ログインへは誘導しない |
+| `targetRef` を書き間違えた `NetworkRole` しか無い | 素通し | 誰にも 403 |
+| `NetworkRole` が解決している | 普段どおり評価する | 普段どおり評価する |
+
+- 閉じるのは値が `"true"` のときだけである。`"True"` や `"yes"` では閉じない
+- ラベルを付けた・外した時点で、全レプリカが再起動なしに新しい既定で判定する
+- ACME の HTTP-01 と `/__gated/` 以下のパスは認可より前に答えるので、閉じない。
+  証明書は普段どおり発行される
+- `NetworkRole` が無いために断っている Ingress には、リーダーが警告イベント
+  `RefusedByDefault` を、その Ingress の名前空間に記録する。応答の本文は、ほかの
+  拒否と変わらない
+- ラベルを変えられるのは Namespace オブジェクトを書ける者だけである。名前空間の中に
+  閉じた権限（組み込みの `edit`・`admin`）では変えられない。閉じた名前空間で Ingress を
+  書く者に、Namespace の書きを与えないこと
+- 閉じた名前空間でも、`NetworkRole` と `NetworkRoleBinding` を書ける者は、
+  `system:unauthenticated` に束ねて誰にでも開ける。防ぐのは付け忘れであって、
+  意図して開くことではない
 
 ## 認証
 
@@ -620,6 +648,7 @@ audience に API サーバ自身の audience（Pod に既定で mount される 
 | セッション署名鍵・アサーション署名鍵が無いときの生成 | 全レプリカ（ADR 0035） |
 | ACME による証明書の取得・更新 | リーダーのみ |
 | `NetworkRole` / `NetworkRoleBinding` の status 書き戻し | リーダーのみ |
+| 閉じた名前空間で断っている Ingress へのイベント | リーダーのみ |
 | Ingress の `status.loadBalancer` 書き戻し | リーダーのみ |
 | 証明書と `NetworkRole` のメトリクス | リーダーのみ |
 | アサーションの署名と公開鍵の配布 | 全レプリカ |

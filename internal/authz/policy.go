@@ -41,6 +41,9 @@ type Binding struct {
 // set it started with, and the read side takes no locks.
 type PolicySet struct {
 	targets map[ResourceRef]*targetPolicy
+	// closed are the namespaces whose resources are refused when no role
+	// names them (ADR 0041).
+	closed map[string]struct{}
 }
 
 // targetPolicy is everything said about one protected resource. Its presence
@@ -73,9 +76,14 @@ type grant struct {
 // namespace would let whoever can write a binding open up a resource in a
 // namespace they do not own.
 //
+// closed names the namespaces that fail closed (ADR 0041). A resource in one
+// of them that no role names is refused rather than served, which is the state
+// a role nobody is bound to already produces. Every other namespace keeps the
+// fail-open default of ADR 0002.
+//
 // The result holds no reference to the slices it was given, so the caller may
 // go on using them.
-func BuildPolicySet(roles []Role, bindings []Binding) *PolicySet {
+func BuildPolicySet(roles []Role, bindings []Binding, closed []string) *PolicySet {
 	subjectsByRole := map[ResourceRef][]string{}
 	for _, b := range bindings {
 		key := ResourceRef{Namespace: b.Namespace, Name: b.RoleName}
@@ -83,6 +91,17 @@ func BuildPolicySet(roles []Role, bindings []Binding) *PolicySet {
 	}
 
 	set := &PolicySet{targets: map[ResourceRef]*targetPolicy{}}
+	for _, namespace := range closed {
+		if namespace == "" {
+			// No resource lives in no namespace; the zero reference
+			// means "not routed" and must stay unprotected.
+			continue
+		}
+		if set.closed == nil {
+			set.closed = map[string]struct{}{}
+		}
+		set.closed[namespace] = struct{}{}
+	}
 	for _, role := range roles {
 		if role.Target.IsZero() {
 			continue
